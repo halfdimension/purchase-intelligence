@@ -1,10 +1,23 @@
 import argparse
 import json
+from urllib.parse import urlparse
 
 import requests
 
 from crawler.scrapers.browser_jsonld import BrowserJsonLdScraper
 from crawler.scrapers.generic_jsonld import GenericJsonLdScraper
+from crawler.scrapers.nike import NikeScraper
+
+
+def choose_scraper(url: str):
+    hostname = (
+        urlparse(url).hostname or ""
+    ).lower()
+
+    if "nike." in hostname:
+        return NikeScraper()
+
+    return None
 
 
 def main():
@@ -20,32 +33,54 @@ def main():
     args = parser.parse_args()
 
     try:
-        try:
-            print("Trying standard HTTP scraper...\n")
+        scraper = choose_scraper(
+            args.url
+        )
 
-            scraper = GenericJsonLdScraper()
-            product = scraper.scrape(args.url)
-
-        except requests.HTTPError as exc:
-            status_code = (
-                exc.response.status_code
-                if exc.response is not None
-                else None
-            )
-
-            if status_code != 403:
-                raise
-
+        if scraper is not None:
             print(
-                "\nStandard request received 403."
+                "Using retailer-specific scraper: Nike\n"
             )
 
-            print(
-                "Falling back to browser rendering...\n"
+            product = scraper.scrape(
+                args.url
             )
 
-            scraper = BrowserJsonLdScraper()
-            product = scraper.scrape(args.url)
+        else:
+            try:
+                print(
+                    "Trying standard HTTP scraper...\n"
+                )
+
+                scraper = GenericJsonLdScraper()
+
+                product = scraper.scrape(
+                    args.url
+                )
+
+            except requests.HTTPError as exc:
+                status_code = (
+                    exc.response.status_code
+                    if exc.response is not None
+                    else None
+                )
+
+                if status_code != 403:
+                    raise
+
+                print(
+                    "\nStandard request received 403."
+                )
+
+                print(
+                    "Falling back to browser rendering...\n"
+                )
+
+                scraper = BrowserJsonLdScraper()
+
+                product = scraper.scrape(
+                    args.url
+                )
 
         print("\nNormalized product:")
 

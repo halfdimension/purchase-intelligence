@@ -6,7 +6,10 @@ from crawler.scrapers.generic_jsonld import GenericJsonLdScraper
 
 
 class BrowserJsonLdScraper(GenericJsonLdScraper):
-    def scrape(self, url: str) -> ProductData:
+    def fetch_rendered_html(
+        self,
+        url: str,
+    ) -> tuple[str, str]:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 headless=True,
@@ -42,8 +45,13 @@ class BrowserJsonLdScraper(GenericJsonLdScraper):
                     f"Browser HTML: {len(html)} bytes"
                 )
 
+                return final_url, html
+
             finally:
                 browser.close()
+
+    def scrape(self, url: str) -> ProductData:
+        final_url, html = self.fetch_rendered_html(url)
 
         soup = BeautifulSoup(
             html,
