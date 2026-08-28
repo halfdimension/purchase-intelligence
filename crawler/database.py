@@ -148,3 +148,24 @@ def get_tracked_products() -> list[dict]:
         unique_products[product_id] = product
 
     return list(unique_products.values())
+
+
+def get_watchlists_for_product(
+    product_id: str,
+) -> list[dict]:
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .table("watchlists")
+        .select(
+            "id,email,desired_size,target_price"
+        )
+        .eq(
+            "product_id",
+            product_id,
+        )
+        .execute()
+    )
+
+    return response.data or []

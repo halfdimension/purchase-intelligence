@@ -2,8 +2,10 @@ from urllib.parse import urlparse
 
 import requests
 
+from crawler.alerts import evaluate_watch
 from crawler.database import (
     get_tracked_products,
+    get_watchlists_for_product,
     save_product,
 )
 from crawler.scrapers.browser_jsonld import BrowserJsonLdScraper
@@ -123,6 +125,64 @@ def main():
                 "Variants:",
                 len(product.variants),
             )
+
+            watches = get_watchlists_for_product(
+                saved_product["id"]
+            )
+
+            print()
+            print(
+                f"Watch conditions: {len(watches)}"
+            )
+
+            for watch in watches:
+                evaluation = evaluate_watch(
+                    watch,
+                    product,
+                )
+
+                print()
+                print(
+                    f"Email: {evaluation.email}"
+                )
+
+                print(
+                    f"Desired size: "
+                    f"{evaluation.desired_size or 'Any'}"
+                )
+
+                print(
+                    f"Target price: "
+                    f"{evaluation.target_price}"
+                )
+
+                print(
+                    f"Current price: "
+                    f"{evaluation.current_price}"
+                )
+
+                print(
+                    f"Size available: "
+                    f"{evaluation.size_available}"
+                )
+
+                print(
+                    f"Price target reached: "
+                    f"{evaluation.price_target_reached}"
+                )
+
+                if evaluation.should_alert:
+                    print(
+                        "Result: ALERT READY"
+                    )
+                else:
+                    print(
+                        "Result: WAIT"
+                    )
+
+                print(
+                    f"Reason: {evaluation.reason}"
+                )
 
             succeeded += 1
 
