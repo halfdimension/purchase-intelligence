@@ -30,6 +30,12 @@ def main():
         help="Product page URL",
     )
 
+    parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save extracted product data to Supabase.",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -91,6 +97,24 @@ def main():
                 ensure_ascii=False,
             )
         )
+
+        if args.save:
+            from crawler.database import save_product
+
+            print("\nSaving product to Supabase...")
+
+            saved_product = save_product(product)
+
+            print(
+                "Saved product ID:",
+                saved_product["id"],
+            )
+
+            print("Price snapshot saved.")
+
+            print(
+                f"Variants saved: {len(product.variants)}"
+            )
 
     except Exception as exc:
         print(
