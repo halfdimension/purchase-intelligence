@@ -114,3 +114,37 @@ def save_product(
         )
 
     return saved_product
+
+
+def get_tracked_products() -> list[dict]:
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .table("watchlists")
+        .select(
+            "product_id, products(id,url,brand,name)"
+        )
+        .execute()
+    )
+
+    unique_products: dict[str, dict] = {}
+
+    for row in response.data or []:
+        product = row.get("products")
+
+        if isinstance(product, list):
+            product = product[0] if product else None
+
+        if not isinstance(product, dict):
+            continue
+
+        product_id = product.get("id")
+        url = product.get("url")
+
+        if not product_id or not url:
+            continue
+
+        unique_products[product_id] = product
+
+    return list(unique_products.values())
