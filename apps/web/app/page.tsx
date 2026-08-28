@@ -1,37 +1,19 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
-type TrackedProduct = {
-  id: number;
-  productUrl: string;
-  brand: string;
-  size: string;
-  targetPrice: string;
+type WatchlistItem = {
+  id: string;
   email: string;
+  desired_size: string | null;
+  target_price: number | null;
+  created_at: string;
+  products: {
+    id: string;
+    url: string;
+    brand: string;
+  };
 };
-
-function detectBrand(productUrl: string) {
-  try {
-    const hostname = new URL(productUrl).hostname.toLowerCase();
-
-    if (hostname.includes("nike.")) {
-      return "Nike";
-    }
-
-    if (hostname.includes("adidas.")) {
-      return "Adidas";
-    }
-
-    if (hostname.includes("asics.")) {
-      return "ASICS";
-    }
-
-    return "Other";
-  } catch {
-    return "Other";
-  }
-}
 
 export default function Home() {
   const [productUrl, setProductUrl] = useState("");
@@ -39,11 +21,41 @@ export default function Home() {
   const [targetPrice, setTargetPrice] = useState("");
   const [email, setEmail] = useState("");
 
-  const [products, setProducts] = useState<TrackedProduct[]>([]);
+  const [products, setProducts] = useState<WatchlistItem[]>([]);
   const [error, setError] = useState("");
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    async function loadWatchlist() {
+      try {
+        const response = await fetch("/api/watchlist");
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Failed to load watchlist.");
+        }
+
+        setProducts(data.watchlist);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Failed to load watchlist.",
+        );
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    loadWatchlist();
+  }, []);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
     setError("");
 
     if (!productUrl.trim()) {
@@ -68,37 +80,75 @@ export default function Home() {
       return;
     }
 
-    const alreadyTracked = products.some(
-      (product) =>
-        product.productUrl === productUrl.trim() &&
-        product.email === email.trim(),
-    );
+    try {
+      setSubmitting(true);
 
-    if (alreadyTracked) {
-      setError("This product is already being tracked for this email.");
-      return;
+      const response = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          productUrl,
+          size,
+          targetPrice,
+          email,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Failed to track product.",
+        );
+      }
+
+      setProducts((currentProducts) => [
+        data.watchlistItem,
+        ...currentProducts,
+      ]);
+
+      setProductUrl("");
+      setSize("");
+      setTargetPrice("");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to track product.",
+      );
+    } finally {
+      setSubmitting(false);
     }
-
-    const newProduct: TrackedProduct = {
-      id: Date.now(),
-      productUrl: productUrl.trim(),
-      brand: detectBrand(productUrl),
-      size,
-      targetPrice,
-      email: email.trim(),
-    };
-
-    setProducts((currentProducts) => [newProduct, ...currentProducts]);
-
-    setProductUrl("");
-    setSize("");
-    setTargetPrice("");
   }
 
-  function removeProduct(id: number) {
-    setProducts((currentProducts) =>
-      currentProducts.filter((product) => product.id !== id),
-    );
+  async function removeProduct(id: string) {
+    setError("");
+
+    try {
+      const response = await fetch(`/api/watchlist/${id}`, {
+        method: "DELETE",
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Failed to remove product.",
+        );
+      }
+
+      setProducts((currentProducts) =>
+        currentProducts.filter((product) => product.id !== id),
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to remove product.",
+      );
+    }
   }
 
   return (
@@ -157,14 +207,19 @@ export default function Home() {
 
           <div className="rounded-3xl border border-zinc-800 bg-zinc-900/60 p-6 shadow-2xl shadow-black/20 sm:p-8">
             <div className="mb-8">
-              <h3 className="text-2xl font-semibold">Track a product</h3>
+              <h3 className="text-2xl font-semibold">
+                Track a product
+              </h3>
 
               <p className="mt-2 text-sm text-zinc-500">
                 Start with an Adidas, Nike or ASICS product URL.
               </p>
             </div>
 
-            <form className="space-y-5" onSubmit={handleSubmit}>
+            <form
+              className="space-y-5"
+              onSubmit={handleSubmit}
+            >
               <div>
                 <label
                   htmlFor="productUrl"
@@ -175,10 +230,11 @@ export default function Home() {
 
                 <input
                   id="productUrl"
-                  name="productUrl"
                   type="url"
                   value={productUrl}
-                  onChange={(event) => setProductUrl(event.target.value)}
+                  onChange={(event) =>
+                    setProductUrl(event.target.value)
+                  }
                   placeholder="https://www.asics.co.in/..."
                   className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition placeholder:text-zinc-600 focus:border-zinc-500"
                 />
@@ -195,9 +251,10 @@ export default function Home() {
 
                   <select
                     id="size"
-                    name="size"
                     value={size}
-                    onChange={(event) => setSize(event.target.value)}
+                    onChange={(event) =>
+                      setSize(event.target.value)
+                    }
                     className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition focus:border-zinc-500"
                   >
                     <option value="">Select size</option>
@@ -219,11 +276,12 @@ export default function Home() {
 
                   <input
                     id="targetPrice"
-                    name="targetPrice"
                     type="number"
                     min="1"
                     value={targetPrice}
-                    onChange={(event) => setTargetPrice(event.target.value)}
+                    onChange={(event) =>
+                      setTargetPrice(event.target.value)
+                    }
                     placeholder="₹ 8000"
                     className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition placeholder:text-zinc-600 focus:border-zinc-500"
                   />
@@ -240,10 +298,11 @@ export default function Home() {
 
                 <input
                   id="email"
-                  name="email"
                   type="email"
                   value={email}
-                  onChange={(event) => setEmail(event.target.value)}
+                  onChange={(event) =>
+                    setEmail(event.target.value)
+                  }
                   placeholder="you@example.com"
                   className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition placeholder:text-zinc-600 focus:border-zinc-500"
                 />
@@ -257,9 +316,12 @@ export default function Home() {
 
               <button
                 type="submit"
-                className="w-full cursor-pointer rounded-xl bg-zinc-100 px-4 py-3 font-medium text-zinc-950 transition hover:bg-white"
+                disabled={submitting}
+                className="w-full cursor-pointer rounded-xl bg-zinc-100 px-4 py-3 font-medium text-zinc-950 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Track Product
+                {submitting
+                  ? "Adding Product..."
+                  : "Track Product"}
               </button>
             </form>
 
@@ -271,16 +333,24 @@ export default function Home() {
 
         <section className="mt-20 border-t border-zinc-900 pt-10">
           <div className="mb-6">
-            <h2 className="text-2xl font-semibold">Your watchlist</h2>
+            <h2 className="text-2xl font-semibold">
+              Your watchlist
+            </h2>
 
             <p className="mt-2 text-sm text-zinc-500">
-              Products currently being tracked in this browser session.
+              Products stored in your persistent watchlist.
             </p>
           </div>
 
-          {products.length === 0 ? (
+          {loading ? (
+            <div className="rounded-2xl border border-zinc-800 px-6 py-12 text-center text-zinc-500">
+              Loading watchlist...
+            </div>
+          ) : products.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-zinc-800 px-6 py-12 text-center">
-              <p className="text-zinc-400">No products tracked yet.</p>
+              <p className="text-zinc-400">
+                No products tracked yet.
+              </p>
 
               <p className="mt-2 text-sm text-zinc-600">
                 Add your first product using the form above.
@@ -297,45 +367,56 @@ export default function Home() {
                     <div className="min-w-0">
                       <div className="mb-3 flex items-center gap-3">
                         <span className="rounded-full border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300">
-                          {product.brand}
+                          {product.products.brand}
                         </span>
 
                         <span className="text-xs text-emerald-400">
-                          Tracking locally
+                          Stored in database
                         </span>
                       </div>
 
                       <a
-                        href={product.productUrl}
+                        href={product.products.url}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="block truncate text-sm text-zinc-300 underline decoration-zinc-700 underline-offset-4 hover:text-white"
                       >
-                        {product.productUrl}
+                        {product.products.url}
                       </a>
 
                       <div className="mt-4 flex flex-wrap gap-x-8 gap-y-3 text-sm">
                         <div>
-                          <span className="text-zinc-600">Size</span>
+                          <span className="text-zinc-600">
+                            Size
+                          </span>
+
                           <p className="mt-1 text-zinc-300">
-                            {product.size || "Any"}
+                            {product.desired_size || "Any"}
                           </p>
                         </div>
 
                         <div>
-                          <span className="text-zinc-600">Target price</span>
+                          <span className="text-zinc-600">
+                            Target price
+                          </span>
+
                           <p className="mt-1 text-zinc-300">
-                            {product.targetPrice
-                              ? `₹${Number(product.targetPrice).toLocaleString(
-                                  "en-IN",
-                                )}`
+                            {product.target_price !== null
+                              ? `₹${Number(
+                                  product.target_price,
+                                ).toLocaleString("en-IN")}`
                               : "Any drop"}
                           </p>
                         </div>
 
                         <div>
-                          <span className="text-zinc-600">Notify</span>
-                          <p className="mt-1 text-zinc-300">{product.email}</p>
+                          <span className="text-zinc-600">
+                            Notify
+                          </span>
+
+                          <p className="mt-1 text-zinc-300">
+                            {product.email}
+                          </p>
                         </div>
                       </div>
                     </div>
