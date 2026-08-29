@@ -684,10 +684,15 @@ Milestone 3 progress:
 - automatic `auth.users` -> `public.profiles` creation verified end-to-end
 - Auth user UUID and profile UUID verified identical
 - new profile defaults to role `user`
+- Milestone 3B profile RLS installed and verified
+- authenticated users can read only their own profile
+- authenticated users can update only `display_name` and `avatar_url`
+- authenticated users cannot update `role`, `email`, or `id`
+- cross-user profile visibility verified as blocked
 
 Next:
 
-- Milestone 3B: profile RLS policies
+- Milestone 3C: authenticated catalog read policies
 
 Design before coding:
 
