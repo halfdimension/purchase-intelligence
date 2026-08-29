@@ -203,17 +203,21 @@ def get_phase1_watches_for_listing(
 def save_phase1_evaluation_state(
     evaluation,
     previous_state: dict | None = None,
+    *,
+    notification_completed: bool = False,
+    notified_at: str | None = None,
 ) -> dict:
     """
     Persist the latest Phase 1 watch evaluation state.
 
-    Existing notification metadata is deliberately left
+    By default, existing notification metadata is left
     untouched.
 
-    This function does NOT create a notification and does NOT
-    modify:
-      - last_notified_at
-      - last_notified_effective_price
+    When notification_completed=True, the evaluation update and
+    notification metadata are persisted in the same database
+    write.
+
+    This function does NOT create or deliver a notification.
     """
 
     from datetime import datetime, timezone
@@ -273,6 +277,20 @@ def save_phase1_evaluation_state(
         "state": state,
         "last_evaluated_at": evaluated_at,
     }
+
+    if notification_completed:
+        completed_at = (
+            notified_at
+            or evaluated_at
+        )
+
+        evaluation_payload[
+            "last_notified_at"
+        ] = completed_at
+
+        evaluation_payload[
+            "last_notified_effective_price"
+        ] = evaluation.current_price
 
     supabase = get_supabase()
 
