@@ -695,10 +695,19 @@ Milestone 3 progress:
 - inactive merchants, hidden products and inactive listings/variants are blocked
 - authenticated users have no catalog INSERT, UPDATE or DELETE privileges
 - positive and negative catalog RLS paths verified with rollback-only test fixtures
+- Milestone 3D per-user watch ownership RLS installed and verified
+- authenticated users can create, read, update, and delete only their own watch intents
+- watch `user_id` and `product_id` are immutable after creation
+- authenticated users can manage listing targets only for their own watches
+- listing targets must reference listings for the same canonical product as the watch
+- watch listing target ownership correctly inherits through `watch_id`
+- authenticated users can read evaluator state only for their own watches
+- authenticated users cannot insert, update, or delete evaluator state
+- cross-user watch, target, evaluator visibility and modification were verified as blocked
 
 Next:
 
-- Milestone 3D: per-user watch ownership policies
+- Milestone 3E: notification preferences, notifications, and feature-entitlement security
 
 Design before coding:
 
