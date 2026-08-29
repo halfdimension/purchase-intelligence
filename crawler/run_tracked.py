@@ -14,6 +14,12 @@ from crawler.phase1_database import (
     get_phase1_crawl_targets,
     save_product_phase1,
 )
+from crawler.phase1_watch_database import (
+    get_phase1_watches_for_listing,
+)
+from crawler.phase1_watch_processor import (
+    process_phase1_watch,
+)
 from crawler.scrapers.browser_jsonld import BrowserJsonLdScraper
 from crawler.scrapers.generic_jsonld import GenericJsonLdScraper
 from crawler.scrapers.nike import NikeScraper
@@ -150,6 +156,94 @@ def main():
                         ]
                     ),
                 )
+
+                phase1_watches = (
+                    get_phase1_watches_for_listing(
+                        phase1_result["listing"]
+                    )
+                )
+
+                print()
+                print(
+                    "Phase 1 shadow watch evaluations:",
+                    len(phase1_watches),
+                )
+
+                for watch_context in phase1_watches:
+                    try:
+                        phase1_watch_result = (
+                            process_phase1_watch(
+                                watch_context,
+                                phase1_result["listing"],
+                                product,
+                                notification_execution_enabled=False,
+                            )
+                        )
+
+                        phase1_evaluation = (
+                            phase1_watch_result.evaluation
+                        )
+
+                        phase1_decision = (
+                            phase1_watch_result.decision
+                        )
+
+                        print()
+                        print(
+                            "  Phase 1 watch:",
+                            phase1_evaluation.watch_id,
+                        )
+
+                        print(
+                            "    Condition met:",
+                            phase1_evaluation.condition_met,
+                        )
+
+                        print(
+                            "    Transition:",
+                            phase1_decision.transition,
+                        )
+
+                        print(
+                            "    Notification required:",
+                            (
+                                phase1_decision
+                                .should_create_notification
+                            ),
+                        )
+
+                        print(
+                            "    Shadow state persisted:",
+                            phase1_watch_result.state_persisted,
+                        )
+
+                        print(
+                            "    Reason:",
+                            phase1_evaluation.reason,
+                        )
+
+                        if (
+                            phase1_decision
+                            .should_create_notification
+                        ):
+                            print(
+                                "    Phase 1 notification "
+                                "execution: SHADOW ONLY"
+                            )
+
+                    except Exception as phase1_watch_exc:
+                        phase1_shadow_failed += 1
+
+                        print()
+                        print(
+                            "PHASE 1 SHADOW WATCH FAILED:",
+                            phase1_watch_exc,
+                        )
+
+                        print(
+                            "Continuing Phase 0 evaluator/"
+                            "notification flow."
+                        )
 
             except Exception as phase1_exc:
                 phase1_shadow_failed += 1
