@@ -667,11 +667,14 @@ Completed:
 - migration `005_phase1_catalog_identity.sql`
 - profiles/catalog/listing foundation created in Supabase
 - RLS enabled on the new Phase 1 foundation
+- migration `006_phase1_observations.sql`
+- listing and listing-variant historical observation tables created
+- RLS enabled on observation tables
 - legacy Phase 0 tables verified intact
 
 Next:
 
-- Milestone 1.5: listing and variant observation tables
+- Milestone 2: watch and notification domain
 
 Design before coding:
 
