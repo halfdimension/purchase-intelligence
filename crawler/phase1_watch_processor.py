@@ -42,6 +42,8 @@ def process_phase1_watch(
     watch_context: dict,
     listing: dict,
     product: ProductData,
+    *,
+    notification_execution_enabled: bool = True,
 ) -> Phase1WatchProcessResult:
     """
     Process one Phase 1 watch against one freshly scraped
@@ -132,7 +134,27 @@ def process_phase1_watch(
 
     # --------------------------------------------------------
     # false -> true notification path.
+    #
+    # During runtime shadow integration, Phase 0 remains the
+    # authoritative notification system. In that mode we must
+    # not create/deliver a Phase 1 notification and must not
+    # advance the Phase 1 state to true.
+    #
+    # Leaving the previous false state unchanged preserves the
+    # legitimate false->true transition for the eventual Phase 1
+    # notification cutover.
     # --------------------------------------------------------
+
+    if not notification_execution_enabled:
+        return Phase1WatchProcessResult(
+            evaluation=evaluation,
+            decision=decision,
+            notification=None,
+            notification_created=False,
+            delivery=None,
+            evaluation_state=None,
+            state_persisted=False,
+        )
 
     draft = build_phase1_notification_draft(
         watch,
