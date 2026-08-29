@@ -169,3 +169,74 @@ def get_watchlists_for_product(
     )
 
     return response.data or []
+
+
+def get_watch_alert_state(
+    watchlist_id: str,
+) -> dict | None:
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .table("watch_alert_state")
+        .select(
+            "watchlist_id,"
+            "condition_met,"
+            "last_reason,"
+            "last_evaluated_at,"
+            "last_notified_at,"
+            "last_notified_price"
+        )
+        .eq(
+            "watchlist_id",
+            watchlist_id,
+        )
+        .limit(1)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if not rows:
+        return None
+
+    return rows[0]
+
+
+def save_watch_alert_state(
+    watchlist_id: str,
+    condition_met: bool,
+    reason: str,
+    notified: bool = False,
+    notified_price: float | None = None,
+) -> None:
+    from datetime import datetime, timezone
+
+    supabase = get_supabase()
+
+    now = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    payload = {
+        "watchlist_id": watchlist_id,
+        "condition_met": condition_met,
+        "last_reason": reason,
+        "last_evaluated_at": now,
+    }
+
+    if notified:
+        payload["last_notified_at"] = now
+        payload["last_notified_price"] = (
+            notified_price
+        )
+
+    (
+        supabase
+        .table("watch_alert_state")
+        .upsert(
+            payload,
+            on_conflict="watchlist_id",
+        )
+        .execute()
+    )

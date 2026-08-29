@@ -6,8 +6,11 @@ from crawler.alerts import evaluate_watch
 from crawler.database import (
     get_tracked_products,
     get_watchlists_for_product,
+    get_watch_alert_state,
     save_product,
+    save_watch_alert_state,
 )
+from crawler.emailer import send_price_alert
 from crawler.scrapers.browser_jsonld import BrowserJsonLdScraper
 from crawler.scrapers.generic_jsonld import GenericJsonLdScraper
 from crawler.scrapers.nike import NikeScraper
@@ -183,6 +186,76 @@ def main():
                 print(
                     f"Reason: {evaluation.reason}"
                 )
+
+                previous_state = get_watch_alert_state(
+                    watch["id"]
+                )
+
+                previous_condition_met = (
+                    previous_state is not None
+                    and previous_state.get(
+                        "condition_met"
+                    ) is True
+                )
+
+                if evaluation.should_alert:
+                    if not previous_condition_met:
+                        print(
+                            "Sending email alert..."
+                        )
+
+                        result = send_price_alert(
+                            recipient=evaluation.email,
+                            product_name=(
+                                product.name
+                                or product.brand
+                                or "Tracked product"
+                            ),
+                            product_url=product.url,
+                            desired_size=(
+                                evaluation.desired_size
+                            ),
+                            current_price=(
+                                evaluation.current_price
+                            ),
+                            target_price=(
+                                evaluation.target_price
+                            ),
+                        )
+
+                        print(
+                            "Email sent:",
+                            result.get("id"),
+                        )
+
+                        save_watch_alert_state(
+                            watchlist_id=watch["id"],
+                            condition_met=True,
+                            reason=evaluation.reason,
+                            notified=True,
+                            notified_price=(
+                                evaluation.current_price
+                            ),
+                        )
+
+                    else:
+                        print(
+                            "Alert already sent. "
+                            "Skipping duplicate email."
+                        )
+
+                        save_watch_alert_state(
+                            watchlist_id=watch["id"],
+                            condition_met=True,
+                            reason=evaluation.reason,
+                        )
+
+                else:
+                    save_watch_alert_state(
+                        watchlist_id=watch["id"],
+                        condition_met=False,
+                        reason=evaluation.reason,
+                    )
 
             succeeded += 1
 
