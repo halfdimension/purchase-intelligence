@@ -11,6 +11,7 @@ from crawler.database import (
     save_watch_alert_state,
 )
 from crawler.emailer import send_price_alert
+from crawler.phase1_database import save_product_phase1
 from crawler.scrapers.browser_jsonld import BrowserJsonLdScraper
 from crawler.scrapers.generic_jsonld import GenericJsonLdScraper
 from crawler.scrapers.nike import NikeScraper
@@ -73,6 +74,7 @@ def main():
 
     succeeded = 0
     failed = 0
+    phase1_shadow_failed = 0
 
     for index, tracked in enumerate(
         tracked_products,
@@ -113,6 +115,51 @@ def main():
                 "Saved product:",
                 saved_product["id"],
             )
+
+            try:
+                phase1_result = save_product_phase1(
+                    product
+                )
+
+                print()
+                print("Phase 1 shadow write:")
+                print(
+                    "  Listing:",
+                    phase1_result["listing"]["id"],
+                )
+                print(
+                    "  Listing observation:",
+                    phase1_result[
+                        "listing_observation"
+                    ]["id"],
+                )
+                print(
+                    "  Variants:",
+                    len(
+                        phase1_result["variants"]
+                    ),
+                )
+                print(
+                    "  Variant observations:",
+                    len(
+                        phase1_result[
+                            "variant_observations"
+                        ]
+                    ),
+                )
+
+            except Exception as phase1_exc:
+                phase1_shadow_failed += 1
+
+                print()
+                print(
+                    "PHASE 1 SHADOW WRITE FAILED:",
+                    phase1_exc,
+                )
+                print(
+                    "Continuing Phase 0 evaluator/"
+                    "notification flow."
+                )
 
             print(
                 "Current price:",
@@ -279,10 +326,14 @@ def main():
         f"Failed:    {failed}"
     )
     print(
+        "Phase 1 shadow failures: "
+        f"{phase1_shadow_failed}"
+    )
+    print(
         "=" * 70
     )
 
-    if failed:
+    if failed or phase1_shadow_failed:
         raise SystemExit(1)
 
 
