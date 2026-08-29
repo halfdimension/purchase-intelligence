@@ -677,9 +677,17 @@ Completed:
 - initial experimental feature flags inserted disabled by default
 - legacy Phase 0 tables verified intact
 
+Milestone 3 progress:
+
+- Milestone 3A Auth profile trigger installed
+- first real Supabase Auth user created
+- automatic `auth.users` -> `public.profiles` creation verified end-to-end
+- Auth user UUID and profile UUID verified identical
+- new profile defaults to role `user`
+
 Next:
 
-- Milestone 3: Supabase Auth, automatic profile creation and real RLS policies
+- Milestone 3B: profile RLS policies
 
 Design before coding:
 
