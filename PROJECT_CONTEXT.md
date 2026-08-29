@@ -739,7 +739,9 @@ Milestone 5 — Phase 1 data backfill:
 - two unused/empty Phase 0 prototype product rows intentionally not migrated
 - Phase 0 tables remain intact and current Phase 0 runtime behavior has not been cut over
 
-Milestone 6 — Phase 1 crawler persistence progress:
+Milestone 6 — Phase 1 crawler persistence:
+
+Status: COMPLETE for the controlled Phase 1 cutover.
 
 - new `crawler/phase1_database.py` persistence layer added
 - existing Phase 1 merchant listing is resolved by URL during controlled cutover
@@ -749,18 +751,27 @@ Milestone 6 — Phase 1 crawler persistence progress:
 - crawler inserts immutable listing-variant observations
 - one shared `checked_at` timestamp is used for a complete crawl persistence event
 - `save_product_phase1()` provides the Phase 1 persistence entry point
-- normal `crawler.run_tracked` now performs Phase 0 persistence plus a Phase 1 shadow write
+- normal crawler execution performs Phase 0 persistence plus Phase 1 persistence during the migration window
 - Phase 1 shadow-write failures do not prevent the existing Phase 0 evaluator/notification path from running
-- the overall crawler job still exits non-zero after processing if a Phase 1 shadow write failed
-- real Nike run verified: 1 listing observation + 6 variant observations, 6 variants updated
-- real dual-write run verified with `Succeeded: 1`, `Failed: 0`, and `Phase 1 shadow failures: 0`
-- Phase 0 watch/evaluator/notification path remains authoritative during this controlled cutover
-- checkpoint commit: `bbfbcb2` (`Add Phase 1 crawler shadow persistence`)
+- the overall crawler job exits non-zero after processing if a Phase 1 persistence write failed
+- Phase 1 crawl-target resolution is now driven by active `watch_intents`
+- `specific_listing` and `selected_listings` use `watch_listing_targets`
+- `any_listing` resolves active merchant listings for the watched canonical product
+- crawl targets are deduplicated so the same merchant listing is crawled only once
+- inactive listings and inactive merchants are excluded
+- Phase 0 and Phase 1 crawl-source parity was verified before switching scheduling
+- normal `crawler.run_tracked` now obtains crawl work from Phase 1 instead of Phase 0 `watchlists/products`
+- real Phase 1-driven run verified with one Nike listing, six variants, one listing observation, and six variant observations
+- runtime verified with `Succeeded: 1`, `Failed: 0`, and `Phase 1 shadow failures: 0`
+- existing Phase 0 evaluator/email path remains temporarily active until Milestone 7
+- checkpoint commits:
+  - `bbfbcb2` — `Add Phase 1 crawler shadow persistence`
+  - `5fd6399` — `Drive crawler scheduling from Phase 1 watches`
 
 Next:
 
-- continue Milestone 6 by moving crawler work discovery toward unique active Phase 1 merchant listings instead of deriving crawl work from Phase 0 watchlists/products
-- preserve Phase 0 evaluator/notification behavior until the Phase 1 evaluator milestone is ready
+- Milestone 7: refactor the watch evaluator, deduplication state, and email notification pipeline to Phase 1 `watch_intents`, `watch_evaluation_state`, notification preferences, notifications, and notification deliveries
+- preserve the proven Phase 0 evaluator/email path until the Phase 1 evaluator path is verified
 
 ## Phase 2 — Product Discovery UX
 
