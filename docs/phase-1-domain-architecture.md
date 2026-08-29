@@ -1441,6 +1441,24 @@ Includes:
 
 No legacy changes.
 
+## Milestone 1.5
+
+Add historical observation foundation.
+
+Includes:
+
+- listing_observations
+- listing_variant_observations
+
+Purpose:
+
+- preserve append-only listing price history
+- preserve variant stock/price history
+- provide the Phase 1 destination for legacy `price_snapshots`
+- keep current price cache separate from historical truth
+
+No legacy tables are changed or removed.
+
 ## Milestone 2
 
 Add watch/notification domain.

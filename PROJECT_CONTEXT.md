@@ -659,7 +659,19 @@ Proves:
 
 ## Phase 1 — Identity + Domain Model Redesign
 
-Next major phase.
+Status: IN PROGRESS.
+
+Completed:
+
+- Phase 1 domain architecture documented
+- migration `005_phase1_catalog_identity.sql`
+- profiles/catalog/listing foundation created in Supabase
+- RLS enabled on the new Phase 1 foundation
+- legacy Phase 0 tables verified intact
+
+Next:
+
+- Milestone 1.5: listing and variant observation tables
 
 Design before coding:
 
