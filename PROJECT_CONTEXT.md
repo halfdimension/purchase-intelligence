@@ -718,25 +718,30 @@ Milestone 3 progress:
 - cross-user preference, notification, delivery, and entitlement visibility verified as blocked
 - substantial Phase 1 RLS/database-security work is complete
 
+Milestone 5 — Phase 1 data backfill:
+
+- migration `013_phase1_backfill_nike_prototype.sql` created
+- migration dry-run executed successfully inside a transaction with rollback
+- real migration executed successfully and committed
+- existing populated Nike Pegasus Premium Phase 0 chain backfilled
+- 1 canonical product created
+- 1 Nike India merchant listing created
+- 6 canonical variants created
+- 6 merchant listing variants created
+- 14 historical Phase 0 price snapshots preserved as listing observations
+- legacy watch mapped to the authenticated profile
+- UK 9 watch mapped to the canonical UK 9 variant
+- target price of 18000 INR preserved
+- specific Nike listing target created
+- legacy watch evaluation/deduplication state preserved
+- email notification preference created
+- post-migration row counts verified
+- two unused/empty Phase 0 prototype product rows intentionally not migrated
+- Phase 0 tables remain intact and current Phase 0 runtime behavior has not been cut over
+
 Next:
 
-- Phase 1 data backfill: migrate the existing working Nike prototype data into the new canonical catalog, listing, observation, watch, and evaluation schema
-
-Design before coding:
-
-- Supabase Auth
-- profiles
-- roles
-- feature flags
-- canonical products
-- merchants
-- merchant listings
-- generic variants
-- watch intents
-- per-user ownership
-- compatibility/migration from prototype schema
-
-Do not begin a large migration before documenting the target schema.
+- Milestone 6: refactor crawler persistence to write normalized Phase 1 merchant listing, variant, and observation data while keeping the existing production path recoverable during cutover
 
 ## Phase 2 — Product Discovery UX
 
@@ -811,22 +816,36 @@ Once sufficient real data exists:
 
 # 19. Immediate Next Step
 
-Do NOT continue randomly adding frontend features.
+Phase 1 schema design, security, Auth foundation, and initial Nike data backfill are now complete.
+
+Do NOT remove or disable the working Phase 0 path yet.
 
 Next major engineering activity:
 
-Design Phase 1 in detail before implementing it.
+Milestone 6 — refactor crawler persistence to the Phase 1 schema.
 
-Specifically define:
+Target direction:
 
-- long-term entities
-- relationships
-- Supabase Auth integration
-- ownership/RLS model
-- canonical-product vs merchant-listing boundaries
-- generic variant representation
-- watch-intent model
-- migration strategy from current prototype
+unique active merchant listing
+    ↓
+merchant-specific crawler adapter
+    ↓
+normalized product/listing state
+    ↓
+merchant_listings latest-state cache
+    ↓
+listing_variants latest-state cache
+    ↓
+listing_observations / listing_variant_observations historical facts
 
-Only after that design is reviewed should the large refactor begin.
+The first implementation should use the existing working Nike crawler and change the persistence boundary rather than rewriting scraping logic unnecessarily.
+
+After crawler persistence is proven:
+
+- refactor watch evaluation
+- refactor notification generation/delivery
+- refactor authenticated Next.js APIs
+- add login/signup/session UX
+- validate the complete cloud path
+- only then cut production usage over from Phase 0
 
