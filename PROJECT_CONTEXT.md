@@ -739,9 +739,28 @@ Milestone 5 — Phase 1 data backfill:
 - two unused/empty Phase 0 prototype product rows intentionally not migrated
 - Phase 0 tables remain intact and current Phase 0 runtime behavior has not been cut over
 
+Milestone 6 — Phase 1 crawler persistence progress:
+
+- new `crawler/phase1_database.py` persistence layer added
+- existing Phase 1 merchant listing is resolved by URL during controlled cutover
+- crawler updates Phase 1 merchant-listing latest state
+- crawler inserts immutable listing observations
+- crawler updates all existing merchant listing variants
+- crawler inserts immutable listing-variant observations
+- one shared `checked_at` timestamp is used for a complete crawl persistence event
+- `save_product_phase1()` provides the Phase 1 persistence entry point
+- normal `crawler.run_tracked` now performs Phase 0 persistence plus a Phase 1 shadow write
+- Phase 1 shadow-write failures do not prevent the existing Phase 0 evaluator/notification path from running
+- the overall crawler job still exits non-zero after processing if a Phase 1 shadow write failed
+- real Nike run verified: 1 listing observation + 6 variant observations, 6 variants updated
+- real dual-write run verified with `Succeeded: 1`, `Failed: 0`, and `Phase 1 shadow failures: 0`
+- Phase 0 watch/evaluator/notification path remains authoritative during this controlled cutover
+- checkpoint commit: `bbfbcb2` (`Add Phase 1 crawler shadow persistence`)
+
 Next:
 
-- Milestone 6: refactor crawler persistence to write normalized Phase 1 merchant listing, variant, and observation data while keeping the existing production path recoverable during cutover
+- continue Milestone 6 by moving crawler work discovery toward unique active Phase 1 merchant listings instead of deriving crawl work from Phase 0 watchlists/products
+- preserve Phase 0 evaluator/notification behavior until the Phase 1 evaluator milestone is ready
 
 ## Phase 2 — Product Discovery UX
 
