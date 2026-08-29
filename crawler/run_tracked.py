@@ -4,14 +4,16 @@ import requests
 
 from crawler.alerts import evaluate_watch
 from crawler.database import (
-    get_tracked_products,
     get_watchlists_for_product,
     get_watch_alert_state,
     save_product,
     save_watch_alert_state,
 )
 from crawler.emailer import send_price_alert
-from crawler.phase1_database import save_product_phase1
+from crawler.phase1_database import (
+    get_phase1_crawl_targets,
+    save_product_phase1,
+)
 from crawler.scrapers.browser_jsonld import BrowserJsonLdScraper
 from crawler.scrapers.generic_jsonld import GenericJsonLdScraper
 from crawler.scrapers.nike import NikeScraper
@@ -61,15 +63,15 @@ def scrape_product(url: str):
 
 
 def main():
-    tracked_products = get_tracked_products()
+    tracked_products = get_phase1_crawl_targets()
 
     if not tracked_products:
-        print("No tracked products found.")
+        print("No Phase 1 crawl targets found.")
         return
 
     print(
         f"Found {len(tracked_products)} "
-        "unique tracked product(s)."
+        "unique Phase 1 crawl target(s)."
     )
 
     succeeded = 0
@@ -83,7 +85,8 @@ def main():
         url = tracked["url"]
 
         name = (
-            tracked.get("name")
+            tracked.get("title")
+            or tracked.get("name")
             or tracked.get("brand")
             or url
         )

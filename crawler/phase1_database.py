@@ -491,3 +491,209 @@ def save_product_phase1(
         "variant_observations": variant_observations,
         "checked_at": checked_at,
     }
+
+
+def get_phase1_crawl_targets() -> list[dict]:
+    """
+    Resolve the unique active merchant listings that need to be
+    crawled because at least one active Phase 1 watch requires
+    them.
+
+    specific_listing / selected_listings:
+        use explicit watch_listing_targets.
+
+    any_listing:
+        use every active listing for the watched canonical
+        product.
+
+    Inactive listings and listings belonging to inactive
+    merchants are excluded.
+    """
+
+    supabase = get_supabase()
+
+    watch_response = (
+        supabase
+        .table("watch_intents")
+        .select(
+            "id,"
+            "product_id,"
+            "tracking_scope"
+        )
+        .eq(
+            "status",
+            "active",
+        )
+        .execute()
+    )
+
+    watches = watch_response.data or []
+
+    if not watches:
+        return []
+
+    explicit_watch_ids: list[str] = []
+    any_listing_product_ids: set[str] = set()
+
+    for watch in watches:
+        scope = watch.get("tracking_scope")
+
+        if scope in (
+            "specific_listing",
+            "selected_listings",
+        ):
+            explicit_watch_ids.append(
+                watch["id"]
+            )
+
+        elif scope == "any_listing":
+            any_listing_product_ids.add(
+                watch["product_id"]
+            )
+
+        else:
+            raise RuntimeError(
+                "Unsupported Phase 1 tracking scope: "
+                f"{scope!r}"
+            )
+
+    listing_ids: set[str] = set()
+
+    if explicit_watch_ids:
+        target_response = (
+            supabase
+            .table("watch_listing_targets")
+            .select(
+                "watch_id,"
+                "listing_id"
+            )
+            .in_(
+                "watch_id",
+                explicit_watch_ids,
+            )
+            .execute()
+        )
+
+        for target in target_response.data or []:
+            listing_ids.add(
+                target["listing_id"]
+            )
+
+    if any_listing_product_ids:
+        any_listing_response = (
+            supabase
+            .table("merchant_listings")
+            .select("id")
+            .in_(
+                "product_id",
+                list(any_listing_product_ids),
+            )
+            .eq(
+                "active",
+                True,
+            )
+            .execute()
+        )
+
+        for listing in (
+            any_listing_response.data or []
+        ):
+            listing_ids.add(
+                listing["id"]
+            )
+
+    if not listing_ids:
+        return []
+
+    merchant_response = (
+        supabase
+        .table("merchants")
+        .select(
+            "id,"
+            "slug,"
+            "name,"
+            "adapter_key"
+        )
+        .eq(
+            "active",
+            True,
+        )
+        .execute()
+    )
+
+    merchants = {
+        row["id"]: row
+        for row in merchant_response.data or []
+    }
+
+    if not merchants:
+        return []
+
+    listing_response = (
+        supabase
+        .table("merchant_listings")
+        .select(
+            "id,"
+            "product_id,"
+            "merchant_id,"
+            "url,"
+            "title,"
+            "active"
+        )
+        .in_(
+            "id",
+            list(listing_ids),
+        )
+        .in_(
+            "merchant_id",
+            list(merchants),
+        )
+        .eq(
+            "active",
+            True,
+        )
+        .order("url")
+        .execute()
+    )
+
+    crawl_targets: list[dict] = []
+
+    seen_urls: set[str] = set()
+
+    for listing in listing_response.data or []:
+        url = listing.get("url")
+        merchant_id = listing.get(
+            "merchant_id"
+        )
+
+        if not url:
+            raise RuntimeError(
+                "Phase 1 crawl target is missing its URL."
+            )
+
+        if url in seen_urls:
+            raise RuntimeError(
+                "Duplicate Phase 1 crawl target URL: "
+                f"{url!r}"
+            )
+
+        merchant = merchants.get(
+            merchant_id
+        )
+
+        if merchant is None:
+            raise RuntimeError(
+                "Phase 1 crawl target has no active "
+                f"merchant: {merchant_id!r}"
+            )
+
+        seen_urls.add(url)
+
+        crawl_targets.append(
+            {
+                **listing,
+                "merchant": merchant,
+            }
+        )
+
+    return crawl_targets
