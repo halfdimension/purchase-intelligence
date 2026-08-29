@@ -689,10 +689,16 @@ Milestone 3 progress:
 - authenticated users can update only `display_name` and `avatar_url`
 - authenticated users cannot update `role`, `email`, or `id`
 - cross-user profile visibility verified as blocked
+- Milestone 3C catalog read RLS installed and verified
+- authenticated users have read-only access to shared catalog tables
+- active catalog records are visible to authenticated users
+- inactive merchants, hidden products and inactive listings/variants are blocked
+- authenticated users have no catalog INSERT, UPDATE or DELETE privileges
+- positive and negative catalog RLS paths verified with rollback-only test fixtures
 
 Next:
 
-- Milestone 3C: authenticated catalog read policies
+- Milestone 3D: per-user watch ownership policies
 
 Design before coding:
 
