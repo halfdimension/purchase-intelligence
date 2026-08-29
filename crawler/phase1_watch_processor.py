@@ -201,14 +201,37 @@ def process_phase1_watch(
         )
 
     # --------------------------------------------------------
-    # Notification processing is complete.
+    # Email notifications may be disabled for this user.
     #
-    # Prefer the delivery timestamp when a delivery row exists.
-    # For a channel-disabled notification, fall back to the
-    # logical notification creation time.
+    # The logical watch transition is complete, so advance the
+    # evaluation state. However, no external notification was
+    # delivered, so notification metadata must remain untouched.
+    # --------------------------------------------------------
+
+    if delivery.status == "disabled":
+        saved_state = save_phase1_evaluation_state(
+            evaluation,
+            previous_state,
+        )
+
+        return Phase1WatchProcessResult(
+            evaluation=evaluation,
+            decision=decision,
+            notification=notification,
+            notification_created=(
+                notification_created
+            ),
+            delivery=delivery,
+            evaluation_state=saved_state,
+            state_persisted=True,
+        )
+
+    # --------------------------------------------------------
+    # A real email delivery is complete, or an earlier delivery
+    # was already complete.
     #
-    # save_phase1_evaluation_state() writes the evaluation and
-    # notification metadata together.
+    # Persist evaluation state and notification metadata in the
+    # same database write.
     # --------------------------------------------------------
 
     notified_at = notification.get(
