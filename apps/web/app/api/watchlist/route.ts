@@ -35,7 +35,20 @@ export async function GET() {
         products (
           id,
           url,
-          brand
+          brand,
+          name,
+          currency,
+          mrp,
+          current_price,
+          image_url,
+          in_stock,
+          last_checked_at,
+          product_variants (
+            size,
+            current_price,
+            in_stock,
+            stock_remaining
+          )
         )
       `)
       .order("created_at", { ascending: false });
@@ -170,7 +183,20 @@ export async function POST(request: Request) {
         products (
           id,
           url,
-          brand
+          brand,
+          name,
+          currency,
+          mrp,
+          current_price,
+          image_url,
+          in_stock,
+          last_checked_at,
+          product_variants (
+            size,
+            current_price,
+            in_stock,
+            stock_remaining
+          )
         )
       `)
       .single();

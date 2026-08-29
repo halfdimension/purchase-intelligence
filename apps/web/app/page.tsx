@@ -2,6 +2,13 @@
 
 import { FormEvent, useEffect, useState } from "react";
 
+type ProductVariant = {
+  size: string;
+  current_price: number | null;
+  in_stock: boolean;
+  stock_remaining: number | null;
+};
+
 type WatchlistItem = {
   id: string;
   email: string;
@@ -12,8 +19,66 @@ type WatchlistItem = {
     id: string;
     url: string;
     brand: string;
+    name: string | null;
+    currency: string | null;
+    mrp: number | null;
+    current_price: number | null;
+    image_url: string | null;
+    in_stock: boolean | null;
+    last_checked_at: string | null;
+    product_variants: ProductVariant[];
   };
 };
+
+function formatPrice(
+  value: number | null,
+  currency: string | null = "INR",
+) {
+  if (value === null) {
+    return "Not checked yet";
+  }
+
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: currency || "INR",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function normalizeSize(size: string) {
+  const match = size.toUpperCase().match(/UK\s*\d+(?:\.\d+)?/);
+
+  if (match) {
+    return match[0].replace(/\s+/g, " ");
+  }
+
+  return size.trim().toUpperCase();
+}
+
+function getDesiredVariant(product: WatchlistItem) {
+  if (!product.desired_size) {
+    return null;
+  }
+
+  const desiredSize = normalizeSize(product.desired_size);
+
+  return (
+    product.products.product_variants.find(
+      (variant) => normalizeSize(variant.size) === desiredSize,
+    ) ?? null
+  );
+}
+
+function formatLastChecked(value: string | null) {
+  if (!value) {
+    return "Waiting for first check";
+  }
+
+  return new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
 
 export default function Home() {
   const [productUrl, setProductUrl] = useState("");
@@ -358,79 +423,145 @@ export default function Home() {
             </div>
           ) : (
             <div className="grid gap-4">
-              {products.map((product) => (
-                <article
-                  key={product.id}
-                  className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5"
-                >
-                  <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="min-w-0">
-                      <div className="mb-3 flex items-center gap-3">
-                        <span className="rounded-full border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300">
-                          {product.products.brand}
-                        </span>
+              {products.map((product) => {
+                const desiredVariant = getDesiredVariant(product);
 
-                        <span className="text-xs text-emerald-400">
-                          Stored in database
-                        </span>
+                const sizeAvailable = product.desired_size
+                  ? desiredVariant?.in_stock ?? false
+                  : product.products.in_stock ?? false;
+
+                return (
+                  <article
+                    key={product.id}
+                    className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5"
+                  >
+                    <div className="flex flex-col gap-6">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="mb-3 flex flex-wrap items-center gap-3">
+                            <span className="rounded-full border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300">
+                              {product.products.brand}
+                            </span>
+
+                            <span
+                              className={`text-xs ${
+                                sizeAvailable
+                                  ? "text-emerald-400"
+                                  : "text-amber-400"
+                              }`}
+                            >
+                              {product.desired_size
+                                ? `${product.desired_size} ${
+                                    sizeAvailable
+                                      ? "in stock"
+                                      : "out of stock"
+                                  }`
+                                : product.products.in_stock
+                                  ? "In stock"
+                                  : "Out of stock"}
+                            </span>
+                          </div>
+
+                          <h3 className="text-lg font-semibold text-zinc-100">
+                            {product.products.name ||
+                              `${product.products.brand} product`}
+                          </h3>
+
+                          <a
+                            href={product.products.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-2 block truncate text-sm text-zinc-500 underline decoration-zinc-700 underline-offset-4 hover:text-zinc-300"
+                          >
+                            {product.products.url}
+                          </a>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => removeProduct(product.id)}
+                          className="cursor-pointer text-sm text-zinc-500 transition hover:text-red-400"
+                        >
+                          Remove
+                        </button>
                       </div>
 
-                      <a
-                        href={product.products.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block truncate text-sm text-zinc-300 underline decoration-zinc-700 underline-offset-4 hover:text-white"
-                      >
-                        {product.products.url}
-                      </a>
-
-                      <div className="mt-4 flex flex-wrap gap-x-8 gap-y-3 text-sm">
+                      <div className="grid gap-4 border-t border-zinc-800 pt-5 sm:grid-cols-2 lg:grid-cols-4">
                         <div>
-                          <span className="text-zinc-600">
-                            Size
+                          <span className="text-xs uppercase tracking-wide text-zinc-600">
+                            Current price
                           </span>
 
-                          <p className="mt-1 text-zinc-300">
-                            {product.desired_size || "Any"}
+                          <p className="mt-1 text-lg font-semibold text-zinc-100">
+                            {formatPrice(
+                              product.products.current_price,
+                              product.products.currency,
+                            )}
                           </p>
                         </div>
 
                         <div>
-                          <span className="text-zinc-600">
-                            Target price
+                          <span className="text-xs uppercase tracking-wide text-zinc-600">
+                            MRP
+                          </span>
+
+                          <p className="mt-1 text-zinc-300">
+                            {formatPrice(
+                              product.products.mrp,
+                              product.products.currency,
+                            )}
+                          </p>
+                        </div>
+
+                        <div>
+                          <span className="text-xs uppercase tracking-wide text-zinc-600">
+                            Your target
                           </span>
 
                           <p className="mt-1 text-zinc-300">
                             {product.target_price !== null
-                              ? `₹${Number(
+                              ? formatPrice(
                                   product.target_price,
-                                ).toLocaleString("en-IN")}`
+                                  product.products.currency,
+                                )
                               : "Any drop"}
                           </p>
                         </div>
 
                         <div>
-                          <span className="text-zinc-600">
-                            Notify
+                          <span className="text-xs uppercase tracking-wide text-zinc-600">
+                            Desired size
                           </span>
 
                           <p className="mt-1 text-zinc-300">
-                            {product.email}
+                            {product.desired_size || "Any"}
                           </p>
+
+                          {desiredVariant?.stock_remaining !== null &&
+                            desiredVariant?.stock_remaining !== undefined && (
+                              <p className="mt-1 text-xs text-amber-400">
+                                {desiredVariant.stock_remaining} remaining
+                              </p>
+                            )}
                         </div>
                       </div>
-                    </div>
 
-                    <button
-                      type="button"
-                      onClick={() => removeProduct(product.id)}
-                      className="cursor-pointer text-sm text-zinc-500 transition hover:text-red-400"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </article>
-              ))}
+                      <div className="flex flex-col gap-2 border-t border-zinc-800 pt-4 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
+                        <span>
+                          Last checked:{" "}
+                          {formatLastChecked(
+                            product.products.last_checked_at,
+                          )}
+                        </span>
+
+                        <span>
+                          Alerts: {product.email}
+                        </span>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           )}
         </section>
