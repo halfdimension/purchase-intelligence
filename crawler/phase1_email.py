@@ -237,6 +237,33 @@ def build_phase1_email_params(
     return params
 
 
+def build_phase1_email_idempotency_key(
+    notification: dict,
+) -> str:
+    """
+    Build a stable provider-level idempotency key.
+
+    The persisted notification ID identifies one logical
+    notification. Retries of that notification therefore use
+    the same Resend idempotency key.
+    """
+
+    notification_id = str(
+        notification.get("id")
+        or ""
+    ).strip()
+
+    if not notification_id:
+        raise RuntimeError(
+            "Phase 1 notification is missing its id."
+        )
+
+    return (
+        "phase1-email:"
+        f"{notification_id}"
+    )
+
+
 def send_phase1_email(
     notification: dict,
     recipient: str,
@@ -248,6 +275,9 @@ def send_phase1_email(
       - notification preference checks
       - delivery claiming
       - recording sent/failed delivery state
+
+    Resend idempotency protects against duplicate provider
+    sends when the same persisted notification is retried.
     """
 
     configure_resend()
@@ -257,6 +287,15 @@ def send_phase1_email(
         recipient,
     )
 
+    options: resend.Emails.SendOptions = {
+        "idempotency_key": (
+            build_phase1_email_idempotency_key(
+                notification
+            )
+        ),
+    }
+
     return resend.Emails.send(
-        params
+        params,
+        options,
     )
