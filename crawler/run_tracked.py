@@ -10,6 +10,9 @@ from crawler.database import (
     save_watch_alert_state,
 )
 from crawler.emailer import send_price_alert
+from crawler.notification_runtime import (
+    get_notification_runtime_mode,
+)
 from crawler.phase1_database import (
     get_phase1_crawl_targets,
     save_product_phase1,
@@ -69,6 +72,15 @@ def scrape_product(url: str):
 
 
 def main():
+    notification_mode = (
+        get_notification_runtime_mode()
+    )
+
+    print(
+        "Notification runtime mode:",
+        notification_mode.name,
+    )
+
     tracked_products = get_phase1_crawl_targets()
 
     if not tracked_products:
@@ -176,7 +188,10 @@ def main():
                                 watch_context,
                                 phase1_result["listing"],
                                 product,
-                                notification_execution_enabled=False,
+                                notification_execution_enabled=(
+                                    notification_mode
+                                    .phase1_notification_execution_enabled
+                                ),
                             )
                         )
 
@@ -225,6 +240,8 @@ def main():
                         if (
                             phase1_decision
                             .should_create_notification
+                            and not notification_mode
+                            .phase1_notification_execution_enabled
                         ):
                             print(
                                 "    Phase 1 notification "
@@ -272,6 +289,19 @@ def main():
                 "Variants:",
                 len(product.variants),
             )
+
+            if (
+                not notification_mode
+                .phase0_notification_execution_enabled
+            ):
+                print()
+                print(
+                    "Phase 0 evaluator/notification flow: "
+                    "DISABLED"
+                )
+
+                succeeded += 1
+                continue
 
             watches = get_watchlists_for_product(
                 saved_product["id"]
