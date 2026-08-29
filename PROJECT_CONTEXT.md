@@ -704,10 +704,23 @@ Milestone 3 progress:
 - authenticated users can read evaluator state only for their own watches
 - authenticated users cannot insert, update, or delete evaluator state
 - cross-user watch, target, evaluator visibility and modification were verified as blocked
+- Milestone 3E notification and feature-entitlement RLS installed and verified
+- authenticated users can read, create, and update only their own notification preferences
+- notification preference ownership cannot be changed
+- push, Telegram, and WhatsApp preferences are entitlement-gated
+- enabling an experimental notification channel without entitlement is blocked
+- enabling the channel succeeds after a valid entitlement is granted
+- authenticated users can read only their own notifications and delivery state
+- authenticated users cannot create or modify notifications or provider delivery state
+- authenticated users can read shared feature definitions but cannot modify them
+- authenticated users can read only their own feature entitlements
+- authenticated users cannot grant, revoke, or modify feature entitlements
+- cross-user preference, notification, delivery, and entitlement visibility verified as blocked
+- substantial Phase 1 RLS/database-security work is complete
 
 Next:
 
-- Milestone 3E: notification preferences, notifications, and feature-entitlement security
+- Phase 1 data backfill: migrate the existing working Nike prototype data into the new canonical catalog, listing, observation, watch, and evaluation schema
 
 Design before coding:
 
