@@ -2,6 +2,8 @@
 
 import { FormEvent, useEffect, useState } from "react";
 
+import { ProductPriceHistory } from "@/app/components/ProductPriceHistory";
+
 type ProductVariant = {
   size: string;
   current_price: number | null;
@@ -246,7 +248,7 @@ export default function Home() {
             </h2>
 
             <p className="mt-6 max-w-lg text-base leading-7 text-zinc-400">
-              Add a product you want to buy. We&apos;ll eventually monitor its
+              Add a product you want to buy. We&apos;ll monitor its
               price, stock, offers and historical lows and tell you when it
               becomes worth buying.
             </p>
@@ -545,6 +547,12 @@ export default function Home() {
                             )}
                         </div>
                       </div>
+
+                      <ProductPriceHistory
+                        productId={product.products.id}
+                        currency={product.products.currency}
+                        targetPrice={product.target_price}
+                      />
 
                       <div className="flex flex-col gap-2 border-t border-zinc-800 pt-4 text-xs text-zinc-500 sm:flex-row sm:items-center sm:justify-between">
                         <span>
