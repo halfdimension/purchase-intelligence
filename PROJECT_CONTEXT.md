@@ -670,11 +670,16 @@ Completed:
 - migration `006_phase1_observations.sql`
 - listing and listing-variant historical observation tables created
 - RLS enabled on observation tables
+- migration `007_phase1_watch_notifications.sql`
+- watch-intent and notification domain created
+- feature flags and per-user entitlements created
+- RLS enabled on Milestone 2 tables
+- initial experimental feature flags inserted disabled by default
 - legacy Phase 0 tables verified intact
 
 Next:
 
-- Milestone 2: watch and notification domain
+- Milestone 3: Supabase Auth, automatic profile creation and real RLS policies
 
 Design before coding:
 
