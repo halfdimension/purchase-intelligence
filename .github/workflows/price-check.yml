@@ -17,6 +17,7 @@ jobs:
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       EMAIL_FROM: Purchase Intelligence <onboarding@resend.dev>
+      PURCHASE_INTELLIGENCE_NOTIFICATION_MODE: phase1
 
     steps:
       - name: Checkout repository
