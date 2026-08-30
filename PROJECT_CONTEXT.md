@@ -762,16 +762,93 @@ Status: COMPLETE for the controlled Phase 1 cutover.
 - Phase 0 and Phase 1 crawl-source parity was verified before switching scheduling
 - normal `crawler.run_tracked` now obtains crawl work from Phase 1 instead of Phase 0 `watchlists/products`
 - real Phase 1-driven run verified with one Nike listing, six variants, one listing observation, and six variant observations
-- runtime verified with `Succeeded: 1`, `Failed: 0`, and `Phase 1 shadow failures: 0`
-- existing Phase 0 evaluator/email path remains temporarily active until Milestone 7
+- runtime verified with `Succeeded: 1`, `Failed: 0`, and zero Phase 1 failures
+- Phase 1 persistence can still operate in migration/shadow mode when required
+- production notification execution has now moved to Phase 1 under Milestone 7
+- Phase 0 product persistence is still retained temporarily during the migration window
 - checkpoint commits:
   - `bbfbcb2` — `Add Phase 1 crawler shadow persistence`
   - `5fd6399` — `Drive crawler scheduling from Phase 1 watches`
 
+Milestone 7 — Phase 1 watch evaluation and notification cutover:
+
+Status: COMPLETE.
+
+- `crawler/phase1_evaluator.py` evaluates Phase 1 `watch_intents`
+- current evaluator supports the controlled shoe-size requirement used by the Nike prototype
+- unsupported future variant requirements fail explicitly rather than being silently mis-evaluated
+- `crawler/phase1_notification_policy.py` owns false/true transition policy
+- false -> true creates a notification opportunity
+- true -> true suppresses duplicate notification delivery
+- true -> false resets the condition so a later false -> true transition may notify again
+- `crawler/phase1_notification_builder.py` creates normalized logical notification drafts
+- logical notifications use stable deduplication keys
+- migration `014_phase1_notification_dedupe.sql` adds database-level notification deduplication
+- `crawler/phase1_notification_database.py` provides idempotent get-or-create notification persistence
+- migration `015_phase1_notification_delivery_dedupe.sql` prevents duplicate delivery rows per notification/channel
+- `crawler/phase1_delivery_database.py` implements delivery claiming/lease semantics
+- stale pending deliveries can be reclaimed
+- sent/delivered states are terminal
+- failed deliveries remain retryable
+- `crawler/phase1_email.py` provides Phase 1 Resend email delivery
+- Resend provider idempotency is keyed by persisted notification id
+- `crawler/phase1_notification_delivery.py` orchestrates delivery claiming, provider execution and delivery-state persistence
+- `crawler/phase1_watch_processor.py` composes evaluation, transition policy, notification creation, delivery and evaluation-state persistence
+- evaluation state and notification metadata advance only after notification execution is complete
+- provider failures leave the watch transition available for retry
+- email-disabled watches advance logical evaluation state without falsely updating `last_notified_at` or `last_notified_effective_price`
+- `crawler/notification_runtime.py` provides explicit notification runtime modes
+- `shadow` mode keeps Phase 0 notifications authoritative while Phase 1 evaluates without sending
+- `phase1` mode makes Phase 1 notifications authoritative and disables the Phase 0 evaluator/email flow
+- runtime modes were verified to be mutually exclusive
+- real Nike crawler smoke test verified `phase1` runtime mode with Phase 0 notification functions blocked
+- controlled real-database false -> true integration test verified:
+  - real Phase 1 notification-row creation
+  - real notification-delivery-row creation
+  - delivery transition to `sent`
+  - watch evaluation state transition to true
+  - `last_notified_at` persistence
+  - notified effective price persistence
+  - external Resend call safely mocked
+  - complete database cleanup and exact baseline restoration afterward
+- scheduled GitHub Actions workflow now sets `PURCHASE_INTELLIGENCE_NOTIFICATION_MODE: phase1`
+- production workflow-dispatch run `33295034636` completed successfully
+- production run verified:
+  - notification runtime mode `phase1`
+  - one Phase 1 crawl target
+  - Nike HTTP/browser extraction succeeded
+  - six variants extracted
+  - Phase 1 persistence succeeded
+  - Phase 1 watch evaluation succeeded
+  - current watch remained false because UK 9 was out of stock
+  - Phase 0 evaluator/notification flow was disabled
+  - crawler completed with one success and zero failures
+- Phase 1 failure behavior is fail-safe in production mode:
+  - no fallback into Phase 0 notifications
+  - job exits non-zero
+- shadow-mode fallback behavior remains available for controlled migration/debug use
+- crawler runtime logging was updated so production Phase 1 execution is no longer mislabeled as shadow execution
+- checkpoint commits include:
+  - `24ac2ea` — `Add Phase 1 watch evaluation foundation`
+  - `61e648b` — Phase 1 notification dedupe migration
+  - `9072a36` — Phase 1 notification persistence
+  - `5a63102` — Phase 1 delivery lease persistence
+  - `2890b0e` — Phase 1 email delivery orchestration
+  - `724e1af` — Phase 1 watch processing pipeline
+  - `963bc97` — Phase 1 notification shadow mode
+  - `0259801` — Phase 1 watch evaluation in crawler shadow mode
+  - `6198148` — notification runtime cutover mode
+  - `4017ec1` — runtime cutover wiring
+  - `ff69b85` — preserve notification metadata when email is disabled
+  - `41d5e01` — cut over scheduled notifications to Phase 1
+  - `149ee42` — clarify Phase 1 crawler runtime logging
+
 Next:
 
-- Milestone 7: refactor the watch evaluator, deduplication state, and email notification pipeline to Phase 1 `watch_intents`, `watch_evaluation_state`, notification preferences, notifications, and notification deliveries
-- preserve the proven Phase 0 evaluator/email path until the Phase 1 evaluator path is verified
+- move the web/authenticated API path onto the Phase 1 identity and watch domain
+- add login/signup/session UX
+- use authenticated user ownership instead of legacy email-based watch identity
+- keep Phase 0 tables intact until web/API compatibility and required historical reads are migrated
 
 ## Phase 2 — Product Discovery UX
 
@@ -846,36 +923,45 @@ Once sufficient real data exists:
 
 # 19. Immediate Next Step
 
-Phase 1 schema design, security, Auth foundation, and initial Nike data backfill are now complete.
+Phase 1 schema design, security, Auth foundation, Nike backfill, crawler persistence, watch evaluation, notification delivery, deduplication and scheduled notification cutover are now complete.
 
-Do NOT remove or disable the working Phase 0 path yet.
+Production scheduled notification execution is now Phase 1 authoritative.
+
+The Phase 0 evaluator/email notification path is disabled in production `phase1` mode.
+
+Do NOT delete the Phase 0 tables yet.
+
+Phase 0 product persistence and legacy web/API compatibility remain temporarily available while the remaining application surface is migrated.
 
 Next major engineering activity:
 
-Milestone 6 — refactor crawler persistence to the Phase 1 schema.
+Move the authenticated web/API path onto the Phase 1 identity and watch domain.
 
 Target direction:
 
-unique active merchant listing
+Supabase Auth session
     ↓
-merchant-specific crawler adapter
+authenticated Next.js API
     ↓
-normalized product/listing state
+current user profile
     ↓
-merchant_listings latest-state cache
+user-owned watch_intents
     ↓
-listing_variants latest-state cache
+watch_listing_targets
     ↓
-listing_observations / listing_variant_observations historical facts
+shared canonical product / merchant listing data
+    ↓
+Phase 1 observations and evaluation state
 
-The first implementation should use the existing working Nike crawler and change the persistence boundary rather than rewriting scraping logic unnecessarily.
+Immediate work should include:
 
-After crawler persistence is proven:
+- login/signup/session handling
+- authenticated user resolution in Next.js
+- Phase 1 watch-intent create/read/update/delete APIs
+- user-owned notification preference APIs
+- authenticated historical observation reads where required
+- frontend migration from legacy email-owned watchlists to authenticated watches
+- compatibility/backfill checks before deleting any Phase 0 data or APIs
 
-- refactor watch evaluation
-- refactor notification generation/delivery
-- refactor authenticated Next.js APIs
-- add login/signup/session UX
-- validate the complete cloud path
-- only then cut production usage over from Phase 0
+The existing Nike crawler and Phase 1 notification pipeline should remain stable while this web/auth migration is implemented.
 
