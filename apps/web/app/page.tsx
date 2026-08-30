@@ -3,34 +3,11 @@
 import { FormEvent, useEffect, useState } from "react";
 
 import { ProductPriceHistory } from "@/app/components/ProductPriceHistory";
-
-type ProductVariant = {
-  size: string;
-  current_price: number | null;
-  in_stock: boolean;
-  stock_remaining: number | null;
-};
-
-type WatchlistItem = {
-  id: string;
-  email: string;
-  desired_size: string | null;
-  target_price: number | null;
-  created_at: string;
-  products: {
-    id: string;
-    url: string;
-    brand: string;
-    name: string | null;
-    currency: string | null;
-    mrp: number | null;
-    current_price: number | null;
-    image_url: string | null;
-    in_stock: boolean | null;
-    last_checked_at: string | null;
-    product_variants: ProductVariant[];
-  };
-};
+import {
+  mapPhase1WatchToWatchlistItem,
+  type Phase1WatchIntent,
+  type WatchlistItem,
+} from "@/lib/watch-intent-ui";
 
 function formatPrice(
   value: number | null,
@@ -97,7 +74,7 @@ export default function Home() {
   useEffect(() => {
     async function loadWatchlist() {
       try {
-        const response = await fetch("/api/watchlist");
+        const response = await fetch("/api/watch-intents");
 
         const data = await response.json();
 
@@ -105,7 +82,15 @@ export default function Home() {
           throw new Error(data.error || "Failed to load watchlist.");
         }
 
-        setProducts(data.watchlist);
+        if (!Array.isArray(data.watches)) {
+          throw new Error("Invalid watchlist response.");
+        }
+
+        setProducts(
+          (data.watches as Phase1WatchIntent[]).map(
+            mapPhase1WatchToWatchlistItem,
+          ),
+        );
       } catch (err) {
         setError(
           err instanceof Error
