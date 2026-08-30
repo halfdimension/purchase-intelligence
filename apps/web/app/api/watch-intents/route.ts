@@ -59,6 +59,14 @@ export async function GET() {
             variant_key,
             image_url
           ),
+          evaluation:watch_evaluation_state (
+            condition_met,
+            last_reason,
+            state,
+            last_evaluated_at,
+            last_notified_at,
+            last_notified_effective_price
+          ),
           listing_targets:watch_listing_targets (
             listing_id,
             created_at,
