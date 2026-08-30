@@ -31,20 +31,35 @@ export async function GET() {
     } = await supabase
       .from("watch_intents")
       .select(
-        [
-          "id",
-          "user_id",
-          "product_id",
-          "canonical_variant_id",
-          "tracking_scope",
-          "target_price",
-          "currency",
-          "variant_requirements",
-          "conditions",
-          "status",
-          "created_at",
-          "updated_at",
-        ].join(","),
+        `
+          id,
+          user_id,
+          product_id,
+          canonical_variant_id,
+          tracking_scope,
+          target_price,
+          currency,
+          variant_requirements,
+          conditions,
+          status,
+          created_at,
+          updated_at,
+          product:canonical_products (
+            id,
+            name,
+            image_url,
+            brand_id,
+            category_id
+          ),
+          canonical_variant:canonical_variants (
+            id,
+            title,
+            canonical_sku,
+            attributes,
+            variant_key,
+            image_url
+          )
+        `,
       )
       .eq("user_id", user.id)
       .order(
