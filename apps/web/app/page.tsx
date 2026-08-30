@@ -203,7 +203,7 @@ export default function Home() {
     setError("");
 
     try {
-      const response = await fetch(`/api/watchlist/${id}`, {
+      const response = await fetch(`/api/watch-intents/${id}`, {
         method: "DELETE",
       });
 
