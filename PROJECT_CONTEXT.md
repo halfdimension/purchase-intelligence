@@ -843,12 +843,86 @@ Status: COMPLETE.
   - `41d5e01` — cut over scheduled notifications to Phase 1
   - `149ee42` — clarify Phase 1 crawler runtime logging
 
-Next:
+Milestone 8/9 — Authenticated web/API cutover:
 
-- move the web/authenticated API path onto the Phase 1 identity and watch domain
-- add login/signup/session UX
-- use authenticated user ownership instead of legacy email-based watch identity
-- keep Phase 0 tables intact until web/API compatibility and required historical reads are migrated
+Status: IN PROGRESS, with the core authenticated watch read/delete paths working.
+
+Completed:
+
+- Supabase SSR authentication foundation added for Next.js
+- authenticated login, logout and signup API routes added
+- authenticated session verification through `/api/auth/me`
+- email-confirmation callback route added
+- login/signup UI added
+- authenticated profile API added through `/api/profile/me`
+- homepage alert identity now comes from the authenticated account profile
+- authenticated Phase 1 watch API added at `/api/watch-intents`
+- Phase 1 watch reads return:
+  - watch intent
+  - canonical product
+  - canonical variant
+  - merchant listing
+  - merchant
+  - listing variants
+  - current variant stock/price
+  - evaluator state
+- homepage watch READ path migrated from legacy `/api/watchlist` to `/api/watch-intents`
+- compatibility adapter added so the existing prototype cards can render Phase 1 data during cutover
+- authenticated Phase 1 watch creation implemented for listings already present in the Phase 1 catalog
+- Phase 1 POST runtime paths verified:
+  - duplicate watch -> 409
+  - unknown/unindexed URL -> 422
+  - valid indexed listing/variant -> 201
+- authenticated Phase 1 DELETE endpoint added at `/api/watch-intents/[id]`
+- DELETE ownership is enforced through authenticated user identity and RLS
+- temporary UK 7 watch creation/deletion was verified end-to-end
+- homepage Remove button migrated to the Phase 1 DELETE endpoint
+- homepage watch DELETE flow verified end-to-end without affecting the existing UK 9 watch
+- recent checkpoints:
+  - `f58317c` — `Migrate homepage watch reads to Phase 1`
+  - `3a355ba` — `Show account email for watch alerts`
+  - `1eb41c8` — `Add authenticated Phase 1 watch creation`
+  - `1fbefcb` — `Add authenticated Phase 1 watch deletion`
+  - `9f35bac` — `Migrate homepage watch deletion to Phase 1`
+
+Current intentional compatibility state:
+
+- homepage READ -> Phase 1
+- homepage DELETE -> Phase 1
+- homepage CREATE -> Phase 0 temporarily
+- Phase 1 POST can create a watch only when the merchant listing is already indexed
+- arbitrary new product URLs do not yet have a Phase 1 ingestion/catalog-creation path
+- Phase 1 crawler persistence currently expects the merchant listing to already exist
+- legacy Phase 0 tables remain intact
+- existing price-history UI still uses the legacy `price_snapshots` history API during the migration window
+
+Next architectural task:
+
+Design and implement the new-product ingestion path.
+
+A new arbitrary URL must eventually flow through a trusted ingestion boundary rather than allowing the normal authenticated client to mutate crawler-owned catalog tables directly.
+
+Target responsibility split:
+
+authenticated user request
+    ↓
+validated tracking / ingestion request
+    ↓
+trusted crawler or ingestion worker
+    ↓
+merchant detection + scrape
+    ↓
+normalized canonical product / listing / variants
+    ↓
+Phase 1 catalog persistence
+    ↓
+materialize the user's watch intent
+    ↓
+normal listing-level crawler scheduling
+
+Do not simply switch the homepage POST from `/api/watchlist` to `/api/watch-intents` until this path exists, because currently unindexed URLs correctly return 422.
+
+Keep Phase 0 tables intact until required web/API compatibility and historical-read migrations are complete.
 
 ## Phase 2 — Product Discovery UX
 
