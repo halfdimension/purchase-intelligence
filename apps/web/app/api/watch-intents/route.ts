@@ -73,6 +73,20 @@ export async function GET() {
               currency,
               in_stock,
               last_checked_at,
+              variants:listing_variants (
+                id,
+                canonical_variant_id,
+                external_sku,
+                title,
+                attributes,
+                variant_key,
+                current_mrp,
+                current_price,
+                currency,
+                in_stock,
+                stock_remaining,
+                last_checked_at
+              ),
               merchant:merchants (
                 id,
                 slug,
