@@ -66,6 +66,7 @@ export default function Home() {
   const [email, setEmail] = useState("");
 
   const [products, setProducts] = useState<WatchlistItem[]>([]);
+  const [accountEmail, setAccountEmail] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const [loading, setLoading] = useState(true);
@@ -102,7 +103,30 @@ export default function Home() {
       }
     }
 
+    async function loadProfile() {
+      try {
+        const response = await fetch("/api/profile/me");
+
+        if (!response.ok) {
+          return;
+        }
+
+        const data = await response.json();
+
+        if (
+          data.profile &&
+          typeof data.profile.email === "string"
+        ) {
+          setAccountEmail(data.profile.email);
+        }
+      } catch {
+        // Watchlist rendering should not fail if profile metadata
+        // cannot be loaded.
+      }
+    }
+
     loadWatchlist();
+    loadProfile();
   }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -548,7 +572,7 @@ export default function Home() {
                         </span>
 
                         <span>
-                          Alerts: {product.email}
+                          Alerts: {accountEmail ?? "Account email"}
                         </span>
                       </div>
                     </div>
