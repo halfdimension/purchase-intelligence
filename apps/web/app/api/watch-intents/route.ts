@@ -58,6 +58,29 @@ export async function GET() {
             attributes,
             variant_key,
             image_url
+          ),
+          listing_targets:watch_listing_targets (
+            listing_id,
+            created_at,
+            listing:merchant_listings (
+              id,
+              url,
+              title,
+              image_url,
+              seller_name,
+              current_mrp,
+              current_price,
+              currency,
+              in_stock,
+              last_checked_at,
+              merchant:merchants (
+                id,
+                slug,
+                name,
+                base_url,
+                adapter_key
+              )
+            )
           )
         `,
       )
