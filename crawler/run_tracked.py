@@ -94,7 +94,7 @@ def main():
 
     succeeded = 0
     failed = 0
-    phase1_shadow_failed = 0
+    phase1_failed = 0
 
     for index, tracked in enumerate(
         tracked_products,
@@ -143,7 +143,7 @@ def main():
                 )
 
                 print()
-                print("Phase 1 shadow write:")
+                print("Phase 1 persistence:")
                 print(
                     "  Listing:",
                     phase1_result["listing"]["id"],
@@ -177,7 +177,7 @@ def main():
 
                 print()
                 print(
-                    "Phase 1 shadow watch evaluations:",
+                    "Phase 1 watch evaluations:",
                     len(phase1_watches),
                 )
 
@@ -228,7 +228,7 @@ def main():
                         )
 
                         print(
-                            "    Shadow state persisted:",
+                            "    State persisted:",
                             phase1_watch_result.state_persisted,
                         )
 
@@ -249,31 +249,51 @@ def main():
                             )
 
                     except Exception as phase1_watch_exc:
-                        phase1_shadow_failed += 1
+                        phase1_failed += 1
 
                         print()
                         print(
-                            "PHASE 1 SHADOW WATCH FAILED:",
+                            "PHASE 1 WATCH FAILED:",
                             phase1_watch_exc,
                         )
 
-                        print(
-                            "Continuing Phase 0 evaluator/"
-                            "notification flow."
-                        )
+                        if (
+                            notification_mode
+                            .phase0_notification_execution_enabled
+                        ):
+                            print(
+                                "Continuing Phase 0 evaluator/"
+                                "notification flow."
+                            )
+                        else:
+                            print(
+                                "Phase 0 evaluator/notification "
+                                "flow is disabled. "
+                                "This run will fail."
+                            )
 
             except Exception as phase1_exc:
-                phase1_shadow_failed += 1
+                phase1_failed += 1
 
                 print()
                 print(
-                    "PHASE 1 SHADOW WRITE FAILED:",
+                    "PHASE 1 PERSISTENCE FAILED:",
                     phase1_exc,
                 )
-                print(
-                    "Continuing Phase 0 evaluator/"
-                    "notification flow."
-                )
+                if (
+                    notification_mode
+                    .phase0_notification_execution_enabled
+                ):
+                    print(
+                        "Continuing Phase 0 evaluator/"
+                        "notification flow."
+                    )
+                else:
+                    print(
+                        "Phase 0 evaluator/notification "
+                        "flow is disabled. "
+                        "This run will fail."
+                    )
 
             print(
                 "Current price:",
@@ -453,14 +473,14 @@ def main():
         f"Failed:    {failed}"
     )
     print(
-        "Phase 1 shadow failures: "
-        f"{phase1_shadow_failed}"
+        "Phase 1 failures: "
+        f"{phase1_failed}"
     )
     print(
         "=" * 70
     )
 
-    if failed or phase1_shadow_failed:
+    if failed or phase1_failed:
         raise SystemExit(1)
 
 
