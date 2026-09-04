@@ -1039,3 +1039,237 @@ Immediate work should include:
 
 The existing Nike crawler and Phase 1 notification pipeline should remain stable while this web/auth migration is implemented.
 
+---
+
+# Latest Handoff Checkpoint — 2026-09-04
+
+## Phase 1 New-Product Ingestion
+
+Architecture reference:
+
+`docs/phase-1-new-product-ingestion.md`
+
+The ingestion boundary is:
+
+authenticated user intent
+→ `tracking_requests`
+→ trusted Python crawler/worker
+→ Phase 1 catalog bootstrap
+→ real `watch_intent`
+→ normal Phase 1 monitoring
+
+The browser must remain user-scoped.
+
+The browser/Next.js API must not use the Supabase
+service-role key to manufacture catalog state.
+
+Catalog truth remains crawler-owned.
+
+## Milestone A — Tracking Request Foundation
+
+Status: COMPLETE
+
+Commit:
+
+`133dc3a` — Add Phase 1 tracking requests
+
+Completed and production-verified:
+
+- `tracking_requests` table created
+- authenticated users can SELECT only their own requests
+- authenticated users can INSERT only user-controlled fields
+- worker-owned processing fields are protected
+- status defaults to `pending`
+- attempt count defaults to `0`
+- result IDs default to null
+- RLS enabled
+- positive own-user insertion verified
+- cross-user insertion blocked
+- authenticated worker-state spoofing blocked
+- production table, policies and column privileges verified
+
+User-controlled insert fields:
+
+- user_id
+- requested_url
+- normalized_url
+- variant_requirements
+- target_price
+- target_currency
+- conditions
+
+Worker-owned fields include:
+
+- status
+- attempt_count
+- result_product_id
+- result_listing_id
+- result_watch_id
+- error_code
+- error_message
+- started_at
+- completed_at
+
+## Milestone B — Authenticated Tracking Request API
+
+Status: COMPLETE
+
+Read endpoint commit:
+
+`b923542` — Add authenticated tracking request reads
+
+Submission endpoint commit:
+
+`3300df6` — Add authenticated tracking request submission
+
+Implemented:
+
+`GET /api/tracking-requests`
+
+Behavior verified:
+
+- anonymous request -> 401
+- authenticated request -> 200
+- only current user's rows are read through RLS
+- empty production table -> `{"requests":[]}`
+
+Implemented:
+
+`POST /api/tracking-requests`
+
+Current request inputs:
+
+- productUrl
+- optional size
+- optional targetPrice
+
+Current Phase 1 submission behavior:
+
+- unauthenticated -> 401
+- malformed/missing URL -> 400
+- invalid URL -> 400
+- non-HTTP(S) URL -> 400
+- URL containing credentials -> 400
+- invalid/non-positive target price -> 400
+- unsupported merchant -> 422
+- already-indexed active listing -> 409
+- unindexed supported Nike URL -> 202 + pending request
+
+Current API-side supported host:
+
+- nike.in
+- subdomains of nike.in
+
+This API-side host check is NOT authoritative crawler security.
+
+The trusted worker must independently validate the merchant and
+adapter again before any network access or catalog write.
+
+The POST creates only user-owned staging data.
+
+It does NOT:
+
+- scrape the URL
+- run Playwright
+- create canonical products
+- create canonical variants
+- create merchant listings
+- create listing variants
+- create observations
+- create a watch intent
+
+Those remain trusted worker responsibilities.
+
+Default request conditions currently match the existing watch flow:
+
+- require_in_stock = true
+- notify_target_price = target price was supplied
+- notify_restock = true
+
+Size normalization currently follows the existing UK-size convention.
+
+## Milestone B Tests Completed
+
+Verified:
+
+- lint passes
+- Next.js production build passes
+- anonymous GET -> 401
+- authenticated GET -> 200
+- anonymous POST -> 401
+- unsupported merchant -> 422
+- missing URL -> 400
+- malformed URL -> 400
+- invalid target price -> 400
+- credential-bearing URL -> 400
+- existing indexed Nike Pegasus listing -> 409
+- existing `/api/watch-intents` indexed path still resolves and
+  correctly returns duplicate-watch 409
+- unindexed Nike-shaped test URL -> 202
+- new request returned:
+  - status `pending`
+  - attempt_count `0`
+  - result IDs null
+  - normalized UK 9 variant requirement
+  - INR target currency
+- authenticated GET read the created request
+- disposable test requests were deleted afterward
+- production `tracking_requests` table returned to zero rows
+
+## Compatibility State
+
+Homepage:
+
+- READ -> Phase 1
+- DELETE -> Phase 1
+- CREATE -> Phase 0 intentionally
+
+Do NOT switch homepage CREATE yet.
+
+Existing indexed-listing creation continues through:
+
+`POST /api/watch-intents`
+
+New unindexed supported URLs will eventually flow through:
+
+`POST /api/tracking-requests`
+
+Phase 0 remains the rollback path until the complete ingestion flow
+has been verified end-to-end.
+
+## Exact Next Work
+
+Next milestone:
+
+Milestone C — trusted crawler request processing
+
+Do not redesign the architecture.
+
+Next implementation sequence should be incremental:
+
+1. inspect the current crawler entry points and Phase 1 persistence
+   code before modifying anything
+2. add trusted retrieval/claiming of pending `tracking_requests`
+3. add authoritative supported-host / adapter validation in Python
+4. verify claim state transitions safely
+5. do NOT implement Phase 1 catalog bootstrap until request claiming
+   and worker-side validation are separately tested
+
+Important worker requirements:
+
+- use service-role access only in trusted crawler code
+- revalidate and renormalize requested URL before network access
+- reject unsupported merchants independently of Next.js
+- claiming must avoid multiple workers processing the same request
+- retries must eventually be idempotent
+- do not disturb the existing production Phase 1 crawler persistence
+  or notification path while introducing ingestion
+
+Later milestones remain:
+
+- Milestone D: Phase 1 catalog bootstrap
+- Milestone E: watch materialization
+- Milestone F: local real-product end-to-end test
+- Milestone G: homepage CREATE cutover
+- Milestone H: cloud workflow test and final context update
+
