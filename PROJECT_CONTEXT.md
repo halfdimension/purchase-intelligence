@@ -1237,39 +1237,117 @@ New unindexed supported URLs will eventually flow through:
 Phase 0 remains the rollback path until the complete ingestion flow
 has been verified end-to-end.
 
+## Milestone C — Trusted Crawler Request Processing
+
+Status: COMPLETE
+
+Completed implementation:
+
+- migration `017_phase1_tracking_request_claim.sql`
+- atomic PostgreSQL request claiming using
+  `FOR UPDATE SKIP LOCKED`
+- only the trusted service role may execute the claim function
+- Python service-role claim wrapper added
+- authoritative worker-side URL and merchant validation added
+- supported ingestion target currently resolves:
+  - merchant: `nike-india`
+  - adapter: `nike`
+  - hostname: `nike.in` or a valid subdomain
+- worker rejects:
+  - unsupported merchants
+  - lookalike/suffix hosts
+  - credential-bearing URLs
+  - explicit ports
+  - localhost/IP targets
+  - malformed or encoded hostnames
+- invalid claimed requests are persisted as `failed`
+- failure updates are guarded by:
+  - request id
+  - `processing` status
+  - exact `attempt_count`
+- stale worker attempts therefore cannot overwrite a newer attempt
+- orchestration now combines:
+  - atomic claim
+  - authoritative target validation
+  - invalid-target failure persistence
+- valid requests are returned as prepared ingestion work items
+- this layer intentionally performs no scraping and no catalog writes
+
+Milestone C checkpoints:
+
+- `5ea63a1` — Add atomic tracking request claiming
+- `d5921af` — Add tracking request claim wrapper
+- `8ba1e81` — Add worker ingestion URL validation
+- `432d42d` — Add tracking request failure persistence
+- `c9e3c42` — Add tracking request worker preparation
+
+Milestone C verification completed:
+
+- empty production claim RPC verified
+- positive pending -> processing claim verified
+- processing -> failed persistence verified
+- exact attempt-count stale-worker guard verified
+- valid + invalid mixed worker batch verified
+- valid Nike request remained prepared/processing
+- invalid merchant request became failed
+- disposable production test rows were removed
+- production `tracking_requests` table returned to zero rows
+
+The production Phase 1 crawler and notification execution path has
+not been modified by Milestone C.
+
 ## Exact Next Work
 
 Next milestone:
 
-Milestone C — trusted crawler request processing
+Milestone D — idempotent Phase 1 catalog bootstrap
 
-Do not redesign the architecture.
+The input boundary is now:
 
-Next implementation sequence should be incremental:
+`PreparedIngestionRequest`
+    ↓
+validated supported merchant target
+    ↓
+scrape into normalized `ProductData`
+    ↓
+Phase 1 catalog bootstrap
 
-1. inspect the current crawler entry points and Phase 1 persistence
-   code before modifying anything
-2. add trusted retrieval/claiming of pending `tracking_requests`
-3. add authoritative supported-host / adapter validation in Python
-4. verify claim state transitions safely
-5. do NOT implement Phase 1 catalog bootstrap until request claiming
-   and worker-side validation are separately tested
+Milestone D must remain separate from watch materialization.
 
-Important worker requirements:
+Initial implementation sequence:
 
-- use service-role access only in trusted crawler code
-- revalidate and renormalize requested URL before network access
-- reject unsupported merchants independently of Next.js
-- claiming must avoid multiple workers processing the same request
-- retries must eventually be idempotent
-- do not disturb the existing production Phase 1 crawler persistence
-  or notification path while introducing ingestion
+1. inspect the current `ProductData` / variant models and Phase 1
+   catalog schema before writing bootstrap code
+2. define the bootstrap result contract containing the resolved
+   canonical product, merchant listing and variant identifiers
+3. re-check merchant listing identity by normalized URL before
+   creating anything
+4. resolve the supported merchant from the validated worker target
+5. create or reuse the canonical product and merchant listing
+6. create/update canonical variants and listing variants
+7. persist the initial listing and variant observations
+8. verify rerunning bootstrap for the same listing is idempotent
+9. verify two requests for the same URL cannot create duplicate
+   merchant listings
+10. do NOT create `watch_intent` or `watch_listing_targets` yet;
+    that remains Milestone E
+
+Important constraints:
+
+- catalog writes remain service-role/trusted-worker only
+- do not weaken catalog RLS
+- do not allow browser/API code to bootstrap catalog rows
+- do not perform aggressive cross-merchant canonical matching yet
+- normalized merchant-listing URL is the initial ingestion identity
+- preserve the existing production Phase 1 crawler/notification path
+- do not switch homepage CREATE yet
+- keep Phase 0 rollback compatibility intact
+- do not wire the new ingestion worker into `crawler.run_tracked`
+  until the bootstrap path is independently proven
 
 Later milestones remain:
 
-- Milestone D: Phase 1 catalog bootstrap
-- Milestone E: watch materialization
-- Milestone F: local real-product end-to-end test
-- Milestone G: homepage CREATE cutover
-- Milestone H: cloud workflow test and final context update
-
+- Milestone E: watch materialization and tracking-request completion
+- Milestone F: local real-product end-to-end ingestion test
+- Milestone G: homepage CREATE cutover and pending/setup UI
+- Milestone H: cloud workflow verification and final context update
