@@ -1,10 +1,10 @@
-import re
-from urllib.parse import urlsplit
-
 from crawler.models import ProductData
 from crawler.phase1_database import (
     normalize_size,
     size_variant_key,
+)
+from crawler.scrapers.nike_url import (
+    nike_india_product_id,
 )
 
 
@@ -29,7 +29,7 @@ def _require_product_name(
 
 def _nike_external_id(
     normalized_url: str,
-) -> str | None:
+) -> str:
     """
     Extract Nike's merchant-specific product identity.
 
@@ -41,21 +41,9 @@ def _nike_external_id(
     validation before this function is called.
     """
 
-    path = urlsplit(
+    return nike_india_product_id(
         normalized_url
-    ).path
-
-    match = re.search(
-        r"/p/([^/?#]+)(?:/)?$",
-        path,
     )
-
-    if match is None:
-        return None
-
-    value = match.group(1).strip()
-
-    return value or None
 
 
 def build_nike_catalog_product_payload(

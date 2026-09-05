@@ -1296,58 +1296,102 @@ Milestone C verification completed:
 The production Phase 1 crawler and notification execution path has
 not been modified by Milestone C.
 
+## Milestone D — Idempotent Catalog Bootstrap
+
+Status: COMPLETE
+
+Completed implementation:
+
+- migration 018 added explicit observation `crawl_event_id`
+  idempotency
+- migration 019 added transactional
+  `bootstrap_phase1_catalog(...)`
+- migration 019 is applied in production
+- bootstrap RPC is `SECURITY INVOKER` and service-role-only
+- normalized Python bootstrap request/result contracts exist
+- Nike `ProductData` payload construction remains in Python
+- catalog persistence wrapper has been fake-client tested
+- bootstrap request construction has been fake-tested
+- merchant URL races, observation retries, variant identities and
+  monotonic latest-state updates are handled transactionally
+
+## Milestone E — Watch Materialization and Completion
+
+Status: IMPLEMENTED LOCALLY; MIGRATION/REAL DATABASE TEST PENDING
+
+Implemented:
+
+- `crawler/phase1_ingestion_adapters.py` keeps generic worker
+  orchestration separate from Nike scraper/payload/size behavior
+- Nike targets must contain a recognizable non-empty `/p/<id>`
+  merchant product identity before scraping
+- Nike browser rendering guards top-level navigation against leaving
+  the supported Nike India hostname family while allowing external
+  subresources
+- the scraped final `ProductData.url` is revalidated and must preserve
+  the authoritative target product id; canonical path/name redirects
+  for the same product id are accepted
+- the trusted worker now performs:
+  - adapter selection
+  - authoritative normalized-URL scrape
+  - `ProductData` bootstrap request construction
+  - catalog bootstrap persistence
+  - requested variant resolution
+  - watch materialization
+- crawl event identity is deterministic per request attempt
+- `checked_at` comes from timezone-aware claim `started_at` and is
+  normalized to UTC
+- only ambiguous HTTP transport/request failures receive one safe
+  retry with the exact same request identity
+- deterministic PostgREST failures are not retried, and raw database
+  or transport exceptions are never stored in user-readable request
+  errors
+- contract/invariant runtime failures remain operator-visible
+- exhausted ambiguous transport attempts leave the request processing
+  for reconciliation rather than manufacturing a terminal state
+- migration `020_phase1_tracking_request_materialization.sql` adds
+  atomic watch/target/request completion
+- the new RPC is `SECURITY INVOKER` and service-role-only
+- request ownership/settings are read from the locked
+  `tracking_requests` row
+- result/status mutation is guarded by request id, processing state
+  and exact attempt count
+- catalog product/listing/variant relationships are verified before
+  watch creation
+- duplicate worker materialization is serialized and produces stable
+  `duplicate_watch` failure state instead of another watch
+- completed materialization can be idempotently replayed after an
+  ambiguous client response
+- expected scrape, bootstrap, variant, and watch-materialization
+  failures persist stable error codes
+- the high-level ingestion processor claims exactly one request per
+  invocation
+- deterministic fake scraper, fake RPC and orchestration tests cover
+  happy path, failures, wrong adapter/brand and retry behavior
+
+Intentionally unchanged:
+
+- homepage CREATE still uses Phase 0
+- browser/Next.js code has no service-role access
+- existing production crawler/notification behavior is unchanged
+- `crawler.run_tracked` does not yet invoke new-product ingestion
+- Phase 0 compatibility remains intact
+- production scheduling and batch claiming remain blocked until a
+  stale-processing lease/reclaim mechanism exists
+
 ## Exact Next Work
 
-Next milestone:
-
-Milestone D — idempotent Phase 1 catalog bootstrap
-
-The input boundary is now:
-
-`PreparedIngestionRequest`
-    ↓
-validated supported merchant target
-    ↓
-scrape into normalized `ProductData`
-    ↓
-Phase 1 catalog bootstrap
-
-Milestone D must remain separate from watch materialization.
-
-Initial implementation sequence:
-
-1. inspect the current `ProductData` / variant models and Phase 1
-   catalog schema before writing bootstrap code
-2. define the bootstrap result contract containing the resolved
-   canonical product, merchant listing and variant identifiers
-3. re-check merchant listing identity by normalized URL before
-   creating anything
-4. resolve the supported merchant from the validated worker target
-5. create or reuse the canonical product and merchant listing
-6. create/update canonical variants and listing variants
-7. persist the initial listing and variant observations
-8. verify rerunning bootstrap for the same listing is idempotent
-9. verify two requests for the same URL cannot create duplicate
-   merchant listings
-10. do NOT create `watch_intent` or `watch_listing_targets` yet;
-    that remains Milestone E
-
-Important constraints:
-
-- catalog writes remain service-role/trusted-worker only
-- do not weaken catalog RLS
-- do not allow browser/API code to bootstrap catalog rows
-- do not perform aggressive cross-merchant canonical matching yet
-- normalized merchant-listing URL is the initial ingestion identity
-- preserve the existing production Phase 1 crawler/notification path
-- do not switch homepage CREATE yet
-- keep Phase 0 rollback compatibility intact
-- do not wire the new ingestion worker into `crawler.run_tracked`
-  until the bootstrap path is independently proven
-
-Later milestones remain:
-
-- Milestone E: watch materialization and tracking-request completion
-- Milestone F: local real-product end-to-end ingestion test
-- Milestone G: homepage CREATE cutover and pending/setup UI
-- Milestone H: cloud workflow verification and final context update
+1. review and apply migration 020
+2. run rollback-only database tests for:
+   - successful materialization
+   - exact-attempt stale guard
+   - completed-call replay
+   - same-user duplicate request behavior
+   - mismatched URL/product/listing/variant rejection
+3. run Milestone F locally with a different real Nike product URL
+4. verify the resulting watch enters normal Phase 1 monitoring
+5. only then decide how the ingestion worker should be scheduled
+6. implement durable processing lease/reclaim before enabling the
+   production worker or batch claims
+7. keep homepage CREATE on Phase 0 until pending/setup UI and the full
+   production path are verified

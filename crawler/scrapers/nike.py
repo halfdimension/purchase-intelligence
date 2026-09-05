@@ -6,9 +6,27 @@ from bs4 import BeautifulSoup
 
 from crawler.models import ProductData, ProductVariant
 from crawler.scrapers.browser_jsonld import BrowserJsonLdScraper
+from crawler.scrapers.nike_url import (
+    require_nike_india_hostname,
+)
 
 
 class NikeScraper(BrowserJsonLdScraper):
+    def __init__(
+        self,
+        *,
+        guard_main_frame_navigations: bool = False,
+    ) -> None:
+        self.guard_main_frame_navigations = (
+            guard_main_frame_navigations
+        )
+
+    def validate_main_frame_navigation(
+        self,
+        url: str,
+    ) -> None:
+        require_nike_india_hostname(url)
+
     def scrape(self, url: str) -> ProductData:
         final_url, html = self.fetch_rendered_html(url)
 

@@ -3,9 +3,13 @@ from datetime import datetime, timezone
 from crawler.database import get_supabase
 from crawler.phase1_ingestion_contract import (
     CATALOG_BOOTSTRAP_RPC,
+    WATCH_MATERIALIZATION_RPC,
     CatalogBootstrapRequest,
     CatalogBootstrapResult,
+    WatchMaterializationRequest,
+    WatchMaterializationResult,
     parse_catalog_bootstrap_result,
+    parse_watch_materialization_result,
 )
 
 
@@ -304,7 +308,7 @@ def persist_phase1_catalog_bootstrap(
         raw_result = raw_result[0]
 
     try:
-        return parse_catalog_bootstrap_result(
+        result = parse_catalog_bootstrap_result(
             raw_result
         )
     except ValueError as exc:
@@ -312,3 +316,81 @@ def persist_phase1_catalog_bootstrap(
             "Catalog bootstrap RPC returned an "
             "invalid result."
         ) from exc
+
+    if (
+        result.crawl_event_id
+        != request.crawl_event_id
+    ):
+        raise RuntimeError(
+            "Catalog bootstrap RPC returned a different "
+            "crawl_event_id."
+        )
+
+    return result
+
+
+def persist_phase1_watch_materialization(
+    request: WatchMaterializationRequest,
+) -> WatchMaterializationResult:
+    """
+    Atomically create a Phase 1 watch and listing target, then
+    complete its claimed tracking request.
+
+    PostgreSQL owns ownership/domain validation, duplicate-watch
+    protection, stale-attempt guarding, and transactionality.
+    """
+
+    if not isinstance(
+        request,
+        WatchMaterializationRequest,
+    ):
+        raise ValueError(
+            "Watch materialization request has invalid type."
+        )
+
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .rpc(
+            WATCH_MATERIALIZATION_RPC,
+            request.to_rpc_params(),
+        )
+        .execute()
+    )
+
+    raw_result = response.data
+
+    if isinstance(raw_result, list):
+        if len(raw_result) != 1:
+            raise RuntimeError(
+                "Watch materialization RPC returned an "
+                "unexpected number of results."
+            )
+
+        raw_result = raw_result[0]
+
+    try:
+        result = parse_watch_materialization_result(
+            raw_result
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "Watch materialization RPC returned an "
+            "invalid result."
+        ) from exc
+
+    if (
+        result.tracking_request_id
+        != request.tracking_request_id
+        or result.product_id
+        != request.product_id
+        or result.listing_id
+        != request.listing_id
+    ):
+        raise RuntimeError(
+            "Watch materialization RPC returned "
+            "different request or catalog identities."
+        )
+
+    return result

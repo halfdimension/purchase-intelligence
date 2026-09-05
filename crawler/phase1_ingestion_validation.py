@@ -5,8 +5,13 @@ from urllib.parse import (
     urlunsplit,
 )
 
+from crawler.scrapers.nike_url import (
+    NIKE_INDIA_ROOT_HOST,
+    is_nike_india_hostname,
+)
 
-NIKE_ROOT_HOST = "nike.in"
+
+NIKE_ROOT_HOST = NIKE_INDIA_ROOT_HOST
 NIKE_ADAPTER_KEY = "nike"
 NIKE_MERCHANT_SLUG = "nike-india"
 
@@ -17,17 +22,6 @@ class ValidatedIngestionTarget:
     hostname: str
     adapter_key: str
     merchant_slug: str
-
-
-def _is_nike_india_hostname(
-    hostname: str,
-) -> bool:
-    return (
-        hostname == NIKE_ROOT_HOST
-        or hostname.endswith(
-            f".{NIKE_ROOT_HOST}"
-        )
-    )
 
 
 def validate_tracking_request_target(
@@ -144,7 +138,7 @@ def validate_tracking_request_target(
                 "an invalid hostname."
             )
 
-    if not _is_nike_india_hostname(
+    if not is_nike_india_hostname(
         hostname
     ):
         raise ValueError(

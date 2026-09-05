@@ -6,6 +6,10 @@ CATALOG_BOOTSTRAP_RPC = (
     "bootstrap_phase1_catalog"
 )
 
+WATCH_MATERIALIZATION_RPC = (
+    "materialize_phase1_tracking_request"
+)
+
 
 def _require_nonempty_string(
     value: object,
@@ -129,6 +133,103 @@ class CatalogBootstrapResult:
         CatalogBootstrapVariantResult,
         ...
     ]
+
+
+@dataclass(frozen=True)
+class WatchMaterializationRequest:
+    tracking_request_id: str
+    attempt_count: int
+    product_id: str
+    listing_id: str
+    normalized_url: str
+    canonical_variant_id: str | None
+    variant_key: str | None
+
+    def to_rpc_params(self) -> dict:
+        tracking_request_id = (
+            _require_uuid_string(
+                self.tracking_request_id,
+                "tracking_request_id",
+            )
+        )
+
+        if (
+            isinstance(self.attempt_count, bool)
+            or not isinstance(
+                self.attempt_count,
+                int,
+            )
+            or self.attempt_count < 1
+        ):
+            raise ValueError(
+                "attempt_count must be a positive integer."
+            )
+
+        product_id = _require_uuid_string(
+            self.product_id,
+            "product_id",
+        )
+
+        listing_id = _require_uuid_string(
+            self.listing_id,
+            "listing_id",
+        )
+
+        normalized_url = _require_nonempty_string(
+            self.normalized_url,
+            "normalized_url",
+        )
+
+        canonical_variant_id = (
+            _require_uuid_string(
+                self.canonical_variant_id,
+                "canonical_variant_id",
+            )
+            if self.canonical_variant_id
+            is not None
+            else None
+        )
+
+        variant_key = (
+            _require_nonempty_string(
+                self.variant_key,
+                "variant_key",
+            )
+            if self.variant_key is not None
+            else None
+        )
+
+        if (
+            canonical_variant_id is None
+        ) != (variant_key is None):
+            raise ValueError(
+                "canonical_variant_id and variant_key must "
+                "both be supplied or both be null."
+            )
+
+        return {
+            "p_tracking_request_id": (
+                tracking_request_id
+            ),
+            "p_attempt_count": self.attempt_count,
+            "p_product_id": product_id,
+            "p_listing_id": listing_id,
+            "p_normalized_url": normalized_url,
+            "p_canonical_variant_id": (
+                canonical_variant_id
+            ),
+            "p_variant_key": variant_key,
+        }
+
+
+@dataclass(frozen=True)
+class WatchMaterializationResult:
+    outcome: str
+    tracking_request_id: str
+    product_id: str
+    listing_id: str
+    watch_id: str
+    already_completed: bool
 
 
 def parse_catalog_bootstrap_result(
@@ -264,4 +365,63 @@ def parse_catalog_bootstrap_result(
             observation_created
         ),
         variants=tuple(variants),
+    )
+
+
+def parse_watch_materialization_result(
+    value: object,
+) -> WatchMaterializationResult:
+    if not isinstance(value, dict):
+        raise ValueError(
+            "Watch materialization RPC result must be an object."
+        )
+
+    outcome = _require_nonempty_string(
+        value.get("outcome"),
+        "outcome",
+    )
+
+    if outcome not in (
+        "completed",
+        "duplicate_watch",
+    ):
+        raise ValueError(
+            "Watch materialization outcome is invalid."
+        )
+
+    already_completed = value.get(
+        "already_completed"
+    )
+
+    if not isinstance(
+        already_completed,
+        bool,
+    ):
+        raise ValueError(
+            "already_completed must be boolean."
+        )
+
+    return WatchMaterializationResult(
+        outcome=outcome,
+        tracking_request_id=(
+            _require_uuid_string(
+                value.get(
+                    "tracking_request_id"
+                ),
+                "tracking_request_id",
+            )
+        ),
+        product_id=_require_uuid_string(
+            value.get("product_id"),
+            "product_id",
+        ),
+        listing_id=_require_uuid_string(
+            value.get("listing_id"),
+            "listing_id",
+        ),
+        watch_id=_require_uuid_string(
+            value.get("watch_id"),
+            "watch_id",
+        ),
+        already_completed=already_completed,
     )

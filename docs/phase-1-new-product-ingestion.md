@@ -1,7 +1,7 @@
 # Phase 1 — New Product Ingestion Architecture
 
-Status: DESIGN
-Date: 2026-08-30
+Status: IMPLEMENTATION IN PROGRESS
+Date: 2026-09-05
 
 Read `PROJECT_CONTEXT.md`, `AGENTS.md`, and
 `docs/phase-1-domain-architecture.md` before changing this design.
@@ -493,15 +493,72 @@ Milestone D:
 - create listing and variants from normalized ProductData
 - ensure retries are idempotent
 
+Status: COMPLETE
+
+Implemented by migrations 018-019 and the trusted Python bootstrap
+contract/database/payload layers. Catalog bootstrap remains a
+service-role-only `SECURITY INVOKER` RPC.
+
 Milestone E:
 - materialize watch_intent and listing target
 - update tracking request result IDs/status
+
+Status: IMPLEMENTED LOCALLY; REAL DATABASE VERIFICATION PENDING
+
+Implementation details:
+
+- generic worker orchestration is separate from the initial Nike
+  adapter and Nike size normalization
+- Nike ingestion requires a recognizable `/p/<id>` target before
+  browser execution
+- Nike browser rendering guards main-frame navigation independently
+  of external image, JavaScript and CDN subresources
+- scraped `ProductData.url` must remain in the Nike India hostname
+  family and preserve the submitted merchant product id; canonical
+  path/name redirects for the same id are accepted
+- the worker scrapes the authoritative normalized target into the
+  existing `ProductData` model
+- `crawl_event_id` is deterministic for the claimed request attempt
+- `checked_at` is derived from timezone-aware claim `started_at` and
+  normalized to UTC
+- only ambiguous HTTP transport/request failures receive one retry,
+  using the exact same persistence request
+- deterministic PostgREST failures are not retried and persist only
+  controlled user-safe messages; full exceptions remain in worker logs
+- contract/invariant `RuntimeError` failures are not retried or hidden
+- if both transport attempts leave commit status unknown, the request
+  remains `processing` for operator reconciliation rather than being
+  falsely completed or failed
+- requested variant requirements resolve in the Python adapter layer
+- migration 020 adds the service-role-only
+  `materialize_phase1_tracking_request(...)` RPC
+- watch intent insertion, listing-target insertion, result IDs and
+  request completion occur in one transaction
+- completion is guarded by request id, `processing` state and exact
+  `attempt_count`
+- completed RPC calls are idempotently replayable after ambiguous
+  client responses
+- duplicate worker materializations for the same user/listing/variant
+  are serialized; the later tracking request becomes `failed` with
+  stable `duplicate_watch` state rather than creating another watch
+- the RPC verifies active product/listing/merchant relationships,
+  authoritative listing URL, currency, and resolved generic variant
+  identity
+- expected worker failures persist stable error codes and do not mark
+  the request completed
+- the high-level processor claims exactly one request per invocation
+- the ingestion worker is not yet wired into `crawler.run_tracked` or
+  the scheduled production workflow
+- durable processing leases/reclaim are required before production
+  scheduling or batch claiming is enabled
 
 Milestone F:
 - local end-to-end test using a different real supported product URL
 - verify crawler persistence
 - verify watch creation
 - verify normal subsequent monitoring
+
+Status: PENDING
 
 Milestone G:
 - update homepage CREATE path
