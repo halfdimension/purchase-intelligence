@@ -1,6 +1,12 @@
 from datetime import datetime, timezone
 
 from crawler.database import get_supabase
+from crawler.phase1_ingestion_contract import (
+    CATALOG_BOOTSTRAP_RPC,
+    CatalogBootstrapRequest,
+    CatalogBootstrapResult,
+    parse_catalog_bootstrap_result,
+)
 
 
 MIN_CLAIM_LIMIT = 1
@@ -251,3 +257,58 @@ def mark_phase1_tracking_request_failed(
         )
 
     return failed
+
+def persist_phase1_catalog_bootstrap(
+    request: CatalogBootstrapRequest,
+) -> CatalogBootstrapResult:
+    """
+    Persist one normalized Phase 1 crawl result through the
+    transactional catalog-bootstrap RPC.
+
+    All catalog identity, latest-state, observation, and
+    idempotency writes are owned by PostgreSQL in one
+    transaction.
+    """
+
+    if not isinstance(
+        request,
+        CatalogBootstrapRequest,
+    ):
+        raise ValueError(
+            "Catalog bootstrap request has invalid type."
+        )
+
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .rpc(
+            CATALOG_BOOTSTRAP_RPC,
+            request.to_rpc_params(),
+        )
+        .execute()
+    )
+
+    raw_result = response.data
+
+    # A scalar jsonb RPC normally returns the JSON object
+    # directly. Keep one narrow compatibility path for clients
+    # that expose a single returned object as a one-item list.
+    if isinstance(raw_result, list):
+        if len(raw_result) != 1:
+            raise RuntimeError(
+                "Catalog bootstrap RPC returned an "
+                "unexpected number of results."
+            )
+
+        raw_result = raw_result[0]
+
+    try:
+        return parse_catalog_bootstrap_result(
+            raw_result
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "Catalog bootstrap RPC returned an "
+            "invalid result."
+        ) from exc
