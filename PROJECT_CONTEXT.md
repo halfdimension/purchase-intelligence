@@ -890,17 +890,22 @@ Current intentional compatibility state:
 - homepage READ -> Phase 1
 - homepage DELETE -> Phase 1
 - homepage CREATE -> Phase 0 temporarily
-- Phase 1 POST can create a watch only when the merchant listing is already indexed
-- arbitrary new product URLs do not yet have a Phase 1 ingestion/catalog-creation path
-- Phase 1 crawler persistence currently expects the merchant listing to already exist
+- `POST /api/watch-intents` can create a watch only when the merchant
+  listing is already indexed
+- unindexed supported Nike URLs can be staged through authenticated
+  `POST /api/tracking-requests`
+- the trusted Phase 1 ingestion worker can now bootstrap the catalog
+  and materialize the resulting watch
+- ingestion-worker production scheduling remains disabled pending a
+  stale-processing lease/reclaim/reconciliation mechanism
 - legacy Phase 0 tables remain intact
 - existing price-history UI still uses the legacy `price_snapshots` history API during the migration window
 
 Next architectural task:
 
-Design and implement the new-product ingestion path.
-
-A new arbitrary URL must eventually flow through a trusted ingestion boundary rather than allowing the normal authenticated client to mutate crawler-owned catalog tables directly.
+Operationalize the verified new-product ingestion path safely without
+allowing the normal authenticated client to mutate crawler-owned
+catalog tables directly.
 
 Target responsibility split:
 
@@ -920,7 +925,8 @@ materialize the user's watch intent
     ↓
 normal listing-level crawler scheduling
 
-Do not simply switch the homepage POST from `/api/watchlist` to `/api/watch-intents` until this path exists, because currently unindexed URLs correctly return 422.
+Do not switch homepage CREATE until ingestion lease/reclaim and safe
+worker scheduling exist and the pending/setup UI is ready.
 
 Keep Phase 0 tables intact until required web/API compatibility and historical-read migrations are complete.
 
@@ -1007,41 +1013,26 @@ Do NOT delete the Phase 0 tables yet.
 
 Phase 0 product persistence and legacy web/API compatibility remain temporarily available while the remaining application surface is migrated.
 
-Next major engineering activity:
+Next major engineering activity is to make trusted new-product
+ingestion safely schedulable.
 
-Move the authenticated web/API path onto the Phase 1 identity and watch domain.
+Dependency order:
 
-Target direction:
+1. implement processing lease/reclaim/reconciliation for trusted
+   ingestion
+2. verify ingestion-worker scheduling and cloud execution safely
+3. cut homepage CREATE over to `tracking_requests` and add
+   pending/setup UI
+4. verify the production UX
+5. retain Phase 0 compatibility until final cutover confidence
 
-Supabase Auth session
-    ↓
-authenticated Next.js API
-    ↓
-current user profile
-    ↓
-user-owned watch_intents
-    ↓
-watch_listing_targets
-    ↓
-shared canonical product / merchant listing data
-    ↓
-Phase 1 observations and evaluation state
-
-Immediate work should include:
-
-- login/signup/session handling
-- authenticated user resolution in Next.js
-- Phase 1 watch-intent create/read/update/delete APIs
-- user-owned notification preference APIs
-- authenticated historical observation reads where required
-- frontend migration from legacy email-owned watchlists to authenticated watches
-- compatibility/backfill checks before deleting any Phase 0 data or APIs
-
-The existing Nike crawler and Phase 1 notification pipeline should remain stable while this web/auth migration is implemented.
+The existing Nike crawler and Phase 1 notification pipeline should
+remain stable while ingestion reliability and the remaining frontend
+cutover are implemented.
 
 ---
 
-# Latest Handoff Checkpoint — 2026-09-04
+# Latest Handoff Checkpoint — 2026-09-05
 
 ## Phase 1 New-Product Ingestion
 
@@ -1317,7 +1308,7 @@ Completed implementation:
 
 ## Milestone E — Watch Materialization and Completion
 
-Status: IMPLEMENTED LOCALLY; MIGRATION/REAL DATABASE TEST PENDING
+Status: COMPLETE
 
 Implemented:
 
@@ -1369,6 +1360,31 @@ Implemented:
 - deterministic fake scraper, fake RPC and orchestration tests cover
   happy path, failures, wrong adapter/brand and retry behavior
 
+Migration 020 real-database verification completed:
+
+- the exact committed migration was rollback-tested against real
+  Supabase PostgreSQL
+- the rollback harness verified:
+  - installation
+  - `SECURITY INVOKER` and service-role-only privileges
+  - successful watch materialization
+  - `watch_listing_target` creation
+  - tracking-request completion
+  - completed-call idempotent replay
+  - stale-attempt rejection
+  - duplicate-watch handling and replay
+  - transaction atomicity on a forced target failure
+- rollback cleanup confirmed that no helper, function, trigger or test
+  row remained
+- the exact committed migration 020 was then applied permanently
+- production privilege verification confirmed:
+  - function installed: true
+  - `SECURITY INVOKER`: true
+  - `search_path`: `""`
+  - `service_role` execute: true
+  - `authenticated` execute: false
+  - `anon` execute: false
+
 Intentionally unchanged:
 
 - homepage CREATE still uses Phase 0
@@ -1379,19 +1395,85 @@ Intentionally unchanged:
 - production scheduling and batch claiming remain blocked until a
   stale-processing lease/reclaim mechanism exists
 
+## Milestone F — Real Ingestion and Monitoring Verification
+
+Status: COMPLETE
+
+Real product:
+
+- Nike Pegasus 42 Men's Road-Running Shoes
+- Nike external product id: `27763518`
+- URL:
+  `https://www.nike.in/nike-pegasus-42-men-s-road-running-shoes/p/27763518`
+- no merchant listing existed by URL or external id before ingestion
+
+Authenticated staging verification:
+
+- `POST /api/tracking-requests` returned HTTP 202
+- requested variant: UK 9
+- target price: INR 13000
+- initial state: `pending`, `attempt_count = 0`
+
+Real ingestion-worker verification:
+
+- guarded Nike browser scrape returned HTTP 200
+- the final URL preserved `/p/27763518`
+- product price/MRP was INR 13995
+- seven variants, UK 6 through UK 12, were scraped
+- `process_phase1_ingestion_requests(1)` completed successfully
+- result identities:
+  - `product_id`: `fb3bcf39-063a-47ba-beeb-0e3d8888ac98`
+  - `listing_id`: `84505eb3-ae9f-499b-80dd-b0e582c21598`
+  - `watch_id`: `db26593f-0714-4f5e-b3c3-3fa962c4a9c7`
+  - `tracking_request_id`: `e2fb50d7-5aa7-4ad2-a8d3-d860f1e6186b`
+
+Persistence verification:
+
+- tracking request completed with `attempt_count = 1` and null
+  `error_code`
+- listing external id: `27763518`
+- listing current price: INR 13995
+- listing in stock: true
+- active watch target: INR 13000
+- variant requirements: `{"size":"UK 9"}`
+- canonical variant: `size:uk-9` / UK 9
+- seven listing variants
+- one initial listing observation
+- seven initial variant observations
+- exactly one `watch_listing_target`
+
+Normal monitoring integration verification:
+
+- `get_phase1_crawl_targets` automatically discovered the new listing
+- the normal Nike scraper completed successfully
+- `save_product_phase1` created another normal observation
+- `get_phase1_watches_for_listing` automatically found the new watch
+- `process_phase1_watch`, with notification execution disabled,
+  produced:
+  - `condition_met = false`
+  - transition `false -> false`
+  - `notification_required = false`
+  - `notification_created = false`
+  - `state_persisted = true`
+  - reason: `Current price ₹13,995 is above target ₹13,000.`
+- output ended with `MILESTONE_F_MONITORING_TEST: PASSED`
+
+Milestones D, E and F are complete.
+
 ## Exact Next Work
 
-1. review and apply migration 020
-2. run rollback-only database tests for:
-   - successful materialization
-   - exact-attempt stale guard
-   - completed-call replay
-   - same-user duplicate request behavior
-   - mismatched URL/product/listing/variant rejection
-3. run Milestone F locally with a different real Nike product URL
-4. verify the resulting watch enters normal Phase 1 monitoring
-5. only then decide how the ingestion worker should be scheduled
-6. implement durable processing lease/reclaim before enabling the
-   production worker or batch claims
-7. keep homepage CREATE on Phase 0 until pending/setup UI and the full
-   production path are verified
+1. implement processing lease/reclaim/reconciliation for trusted
+   ingestion
+2. verify ingestion-worker scheduling and cloud execution safely
+3. cut homepage CREATE over to `tracking_requests` and add
+   pending/setup UI
+4. verify the production UX
+5. retain Phase 0 compatibility until final cutover confidence
+
+Until step 1 is complete:
+
+- do not enable production scheduling or batch ingestion
+- keep the high-level ingestion processor limited to one request per
+  invocation
+- leave exhausted ambiguous transport outcomes in `processing` for
+  reconciliation

@@ -1,6 +1,6 @@
 # Phase 1 — New Product Ingestion Architecture
 
-Status: IMPLEMENTATION IN PROGRESS
+Status: IMPLEMENTED AND VERIFIED; SCHEDULING/CUTOVER PENDING
 Date: 2026-09-05
 
 Read `PROJECT_CONTEXT.md`, `AGENTS.md`, and
@@ -433,12 +433,10 @@ the first database milestone.
 
 # 15. Current GitHub Actions Compatibility
 
-For the prototype, pending tracking requests may be processed by the
-existing scheduled crawler execution.
-
-This means setup may not be immediate.
-
-That is acceptable for the migration milestone.
+Pending tracking requests must not yet be processed by the existing
+scheduled crawler execution. Stale `processing`
+lease/reclaim/reconciliation must be implemented before production
+ingestion scheduling is enabled.
 
 Later options include:
 
@@ -463,12 +461,12 @@ homepage DELETE
     -> Phase 1
 
 homepage CREATE
-    -> Phase 0 until ingestion is ready
+    -> Phase 0 until ingestion scheduling and setup UI are ready
 
 Phase 0 tables remain intact.
 
-Do not switch the homepage create form until the complete new-product
-setup path has been verified end-to-end.
+Do not switch the homepage create form until the worker can be
+scheduled safely and pending/setup UI is ready.
 
 ---
 
@@ -503,7 +501,7 @@ Milestone E:
 - materialize watch_intent and listing target
 - update tracking request result IDs/status
 
-Status: IMPLEMENTED LOCALLY; REAL DATABASE VERIFICATION PENDING
+Status: COMPLETE
 
 Implementation details:
 
@@ -552,22 +550,94 @@ Implementation details:
 - durable processing leases/reclaim are required before production
   scheduling or batch claiming is enabled
 
+Real Supabase PostgreSQL verification:
+
+- the exact committed migration 020 was rollback-tested
+- the rollback harness verified installation, successful
+  materialization, `watch_listing_target` creation, request
+  completion, completed-call replay, stale-attempt rejection,
+  duplicate-watch handling/replay and transaction atomicity on a
+  forced target failure
+- privileges were verified as `SECURITY INVOKER` and
+  service-role-only
+- rollback cleanup left no helper, function, trigger or test row
+- the exact committed migration was then applied permanently
+- production verification confirmed:
+  - function installed: true
+  - `SECURITY INVOKER`: true
+  - `search_path`: `""`
+  - `service_role` execute: true
+  - `authenticated` execute: false
+  - `anon` execute: false
+
 Milestone F:
 - local end-to-end test using a different real supported product URL
 - verify crawler persistence
 - verify watch creation
 - verify normal subsequent monitoring
 
-Status: PENDING
+Status: COMPLETE
+
+Verified with Nike Pegasus 42 Men's Road-Running Shoes:
+
+- external product id: `27763518`
+- URL:
+  `https://www.nike.in/nike-pegasus-42-men-s-road-running-shoes/p/27763518`
+- no listing existed by URL or external id before ingestion
+- authenticated `POST /api/tracking-requests` returned HTTP 202 for
+  UK 9 at a target price of INR 13000
+- the staged request was `pending` with `attempt_count = 0`
+- the guarded browser returned HTTP 200 and preserved `/p/27763518`
+- the scrape returned INR 13995 price/MRP and seven variants from UK 6
+  through UK 12
+- `process_phase1_ingestion_requests(1)` completed successfully
+- result identities:
+  - product: `fb3bcf39-063a-47ba-beeb-0e3d8888ac98`
+  - listing: `84505eb3-ae9f-499b-80dd-b0e582c21598`
+  - watch: `db26593f-0714-4f5e-b3c3-3fa962c4a9c7`
+  - tracking request: `e2fb50d7-5aa7-4ad2-a8d3-d860f1e6186b`
+- persistence verification confirmed:
+  - completed request with `attempt_count = 1` and null error code
+  - listing external id `27763518`, INR 13995 and in stock
+  - active INR 13000 watch with `{"size":"UK 9"}`
+  - canonical `size:uk-9` / UK 9 variant
+  - seven listing variants
+  - one initial listing observation
+  - seven initial variant observations
+  - exactly one `watch_listing_target`
+- normal monitoring automatically discovered and scraped the listing,
+  persisted another observation, found the watch and evaluated it
+- notification execution was disabled; evaluation persisted
+  `condition_met = false`, transition `false -> false`, no required or
+  created notification, and reason
+  `Current price ₹13,995 is above target ₹13,000.`
+- output ended with `MILESTONE_F_MONITORING_TEST: PASSED`
+
+Milestones D, E and F are complete.
 
 Milestone G:
-- update homepage CREATE path
-- show pending/setup state where necessary
+- implement processing lease/reclaim/reconciliation
+- verify safe ingestion-worker scheduling and cloud execution
 
 Milestone H:
-- cloud workflow test
-- update PROJECT_CONTEXT.md
+- update homepage CREATE to use `tracking_requests`
+- add pending/setup UI and verify the production UX
 - retain Phase 0 rollback path until stability is proven
+
+Required next sequence:
+
+1. implement processing lease/reclaim/reconciliation for trusted
+   ingestion
+2. verify worker scheduling/cloud execution safely
+3. cut homepage CREATE over to `tracking_requests` and add
+   pending/setup UI
+4. verify production UX
+5. retain Phase 0 compatibility until final cutover confidence
+
+Until lease/reclaim/reconciliation exists, production ingestion
+scheduling and batch processing remain disabled, the high-level
+processor remains limited to one request per invocation, and exhausted
+ambiguous transport outcomes intentionally remain `processing`.
 
 ---
 
