@@ -1,7 +1,13 @@
 # Phase 1 — New Product Ingestion Architecture
 
-Status: IMPLEMENTED AND VERIFIED; SCHEDULING/CUTOVER PENDING
-Date: 2026-09-05
+Status: LEASE/RECLAIM IMPLEMENTED AND DATABASE-VERIFIED;
+PERMANENT MIGRATION 021 APPLICATION AND SCHEDULING/CUTOVER PENDING
+Date: 2026-09-06
+
+Lease/reclaim status: implemented locally and verified against Supabase
+PostgreSQL with the rollback-only integration harness, rollback cleanup
+verification, and a real two-session `FOR UPDATE SKIP LOCKED`
+concurrency test. Permanent migration 021 application remains pending.
 
 Read `PROJECT_CONTEXT.md`, `AGENTS.md`, and
 `docs/phase-1-domain-architecture.md` before changing this design.
@@ -434,9 +440,15 @@ the first database milestone.
 # 15. Current GitHub Actions Compatibility
 
 Pending tracking requests must not yet be processed by the existing
-scheduled crawler execution. Stale `processing`
-lease/reclaim/reconciliation must be implemented before production
-ingestion scheduling is enabled.
+scheduled crawler execution. Stale `processing` lease/reclaim and
+materialization reconciliation are implemented locally and have passed
+rollback/database verification, including a real two-session
+`FOR UPDATE SKIP LOCKED` concurrency test.
+
+Migration 021 has not yet been permanently applied. The exact tested
+migration must be committed, permanently applied, and its production
+schema/security state verified before production ingestion scheduling
+is enabled.
 
 Later options include:
 
@@ -547,8 +559,13 @@ Implementation details:
 - the high-level processor claims exactly one request per invocation
 - the ingestion worker is not yet wired into `crawler.run_tracked` or
   the scheduled production workflow
-- durable processing leases/reclaim are required before production
-  scheduling or batch claiming is enabled
+- durable processing leases/reclaim are implemented locally and passed
+  the rollback-only Supabase integration harness, rollback cleanup
+  verification, and the real two-session `FOR UPDATE SKIP LOCKED`
+  concurrency test
+- permanent migration 021 application and post-apply production
+  schema/security verification remain required before production
+  ingestion scheduling is enabled
 
 Real Supabase PostgreSQL verification:
 
@@ -619,6 +636,36 @@ Milestone G:
 - implement processing lease/reclaim/reconciliation
 - verify safe ingestion-worker scheduling and cloud execution
 
+Status: IMPLEMENTED LOCALLY; ROLLBACK/DATABASE VERIFICATION PENDING
+
+Implemented locally:
+
+- migration 021 adds database-owned processing lease deadlines
+- `attempt_count` remains the fencing generation
+- pending claims and expired-processing reclaims are atomic and use
+  `FOR UPDATE SKIP LOCKED`
+- claim fairness orders pending `created_at` and expired
+  `lease_expires_at` as one eligibility timeline
+- reclaims increment `attempt_count` and issue a new lease
+- exact-attempt lease renewal is service-role-only
+- a named 600-second worker lease is configurable from 300 through
+  1200 seconds
+- leases renew before browser scrape, catalog bootstrap, and watch
+  materialization; no background heartbeat thread is used
+- ambiguous renewal stops the worker before later side effects
+- ambiguous materialization reconciles authoritative terminal request
+  state when PostgreSQL already committed
+- the high-level processor remains limited to one item per invocation
+- the rollback-only migration harness is under `supabase/tests/`
+
+Not yet complete:
+
+- migration 021 has not been applied
+- the rollback harness has not been run against Supabase PostgreSQL
+- true simultaneous-session `SKIP LOCKED` behavior still needs the
+  documented manual database check
+- ingestion scheduling/cloud execution remains disabled
+
 Milestone H:
 - update homepage CREATE to use `tracking_requests`
 - add pending/setup UI and verify the production UX
@@ -626,22 +673,155 @@ Milestone H:
 
 Required next sequence:
 
-1. implement processing lease/reclaim/reconciliation for trusted
-   ingestion
-2. verify worker scheduling/cloud execution safely
-3. cut homepage CREATE over to `tracking_requests` and add
+1. review migration 021 and run its rollback/database harness
+2. decide whether to apply migration 021
+3. verify worker scheduling/cloud execution safely
+4. cut homepage CREATE over to `tracking_requests` and add
    pending/setup UI
-4. verify production UX
-5. retain Phase 0 compatibility until final cutover confidence
+5. verify production UX
+6. retain Phase 0 compatibility until final cutover confidence
 
-Until lease/reclaim/reconciliation exists, production ingestion
-scheduling and batch processing remain disabled, the high-level
-processor remains limited to one request per invocation, and exhausted
-ambiguous transport outcomes intentionally remain `processing`.
+Until migration 021 passes rollback/database verification and is
+deliberately applied, production ingestion scheduling and batch
+processing remain disabled. The high-level processor remains limited
+to one request per invocation.
 
 ---
 
-# 18. Non-Goals
+# 18. Lease, Reclaim, and Reconciliation Design
+
+## Lease state and policy
+
+`tracking_requests.lease_expires_at` is the only new lease field.
+
+`attempt_count` is already a durable monotonically increasing fencing
+generation, so another random token would duplicate its role. A
+heartbeat timestamp would not participate in any correctness decision;
+the authoritative deadline is sufficient.
+
+PostgreSQL time establishes and renews the deadline. The default lease
+is 600 seconds and can be configured with
+`PHASE1_INGESTION_LEASE_SECONDS`. Python and SQL both enforce a range of
+300 through 1200 seconds. The lower bound covers the longest current
+persistence stage: the pinned Supabase/PostgREST timeout is 120 seconds
+and the worker may transmit the same request twice. It also exceeds the
+current Playwright 60-second navigation plus 5-second settle. The
+600-second default leaves operational margin. The 1200-second upper
+bound matches the current 20-minute workflow job limit, so an abandoned
+claim cannot be configured beyond the invocation budget without an
+explicit policy change.
+
+Rows created by the pre-021 worker with `status = 'processing'` receive
+`lease_expires_at = now()` during migration and are therefore explicitly
+reclaimable after deployment. Terminal status remains the authoritative
+reclaim gate even if a row retains its final lease deadline.
+
+## Claim and renewal
+
+The claim RPC considers:
+
+- pending rows; and
+- processing rows whose lease has expired according to PostgreSQL.
+
+It locks candidates with `FOR UPDATE SKIP LOCKED`, updates the state in
+the same statement, increments `attempt_count`, replaces `started_at`,
+issues a new deadline, and clears stale errors. Eligible work is ordered
+by the time it became eligible: `created_at` for pending rows and
+`lease_expires_at` for expired processing rows, followed by `id` as the
+stable tie breaker. This prevents an endless stream of newer pending
+requests from stranding an expired request. A reclaimed request receives
+a fresh future deadline, so repeated crashes cannot continuously
+monopolize the queue either.
+
+Renewal requires request id, processing status, the exact
+`attempt_count`, and an unexpired current lease. A zero-row result is a
+confirmed ownership loss. Transport ambiguity is retried once with the
+same guard; if both responses are ambiguous, the worker stops without
+scraping or performing a later database side effect.
+
+The worker renews only at the three meaningful long-stage boundaries:
+
+1. before browser scrape;
+2. before catalog bootstrap; and
+3. before watch materialization.
+
+No background heartbeat is needed for the bounded current operations.
+
+## Ambiguous outcome reconciliation
+
+Catalog bootstrap keeps its existing transport-only retry. If both
+responses are ambiguous, the request stays processing. Once its lease
+expires, a new generation may scrape and bootstrap again. Migration 019
+converges catalog identity by normalized URL, deduplicates a single
+attempt by stable `crawl_event_id`, and only updates latest-state caches
+when `checked_at` is newer.
+
+After two ambiguous materialization responses, the worker reads the
+authoritative tracking request. A same-attempt completed row returns its
+persisted product/listing/watch identities. A same-attempt
+`failed/duplicate_watch` row returns that terminal outcome. A processing
+row remains unresolved and is left for expiry. A newer generation is
+reported internally as ownership loss. No uncertain outcome is turned
+into a user product failure.
+
+## Crash and concurrency windows
+
+- A — death after claim and before validation: the initial lease
+  expires; reclaim creates the next attempt generation.
+- B — death during Nike browser scrape: the pre-scrape renewal bounds
+  abandonment; reclaim creates the next generation.
+- C — bootstrap commits, then the worker dies: catalog state remains;
+  the reclaimed generation safely re-scrapes, reuses the URL identity,
+  and can materialize the watch.
+- D — bootstrap commits but its response is lost: same-attempt retry is
+  idempotent; if both responses are lost, case C applies after expiry.
+- E — materialization commits but its response is lost: watch, target,
+  result ids, and completed status committed atomically. Replay or the
+  reconciliation read observes that terminal state; claim ignores it.
+- F — duplicate-watch handling commits but its response is lost: the
+  stable failed/duplicate state is replayable and never creates a watch.
+- G — attempt N expires, N+1 is reclaimed, then N resumes: N cannot
+  renew, fail, or materialize the request because those writes require
+  the exact current generation.
+- H — explicit stale renew/fail/materialize calls: renewal returns no
+  row, guarded failure affects no row, and migration 020 rejects the
+  stale attempt.
+- I — renewal response is ambiguous: the exact guarded renewal is
+  retried once; another ambiguous response stops all later side effects.
+- J — repeated crashes: each expired request remains safely reclaimable.
+  No arbitrary attempt ceiling is imposed before scheduling telemetry
+  exists. Fair eligibility-time ordering eventually serves stale and
+  pending work, while every reclaim advances the stale row's next
+  eligibility time.
+- K — terminalization races reclaim: row locking chooses the winner and
+  repeated status/attempt predicates prevent resurrection or stale
+  completion.
+
+Migration 019 deliberately does not know the tracking-request
+generation. An already in-flight attempt-N bootstrap can therefore
+finish after N+1 exists. This is acceptable: stable per-attempt event
+identity prevents retry duplicates, URL/catalog uniqueness converges on
+one listing, immutable observations may safely arrive out of order, and
+the `checked_at` monotonic guards prevent the older attempt from
+overwriting newer current state. No concrete corruption path requires a
+change to the already-applied migration. The rollback harness covers
+both an exact-event replay and an old attempt's first bootstrap call
+after N+1 has already persisted newer listing and variant state.
+
+## Deferred retry budget
+
+Migration 021 intentionally does not terminalize a request after a
+fixed number of expired generations. An expired attempt may have
+committed useful catalog state immediately before dying, and all current
+remaining work is designed to be safely repeatable. Three generations
+had no production evidence behind it and could abandon a recoverable
+user request. Attempt counts must be observed during later scheduling;
+an operational dead-letter policy can be added when real failure data
+supports a threshold and recovery workflow.
+
+---
+
+# 19. Non-Goals
 
 This ingestion milestone does NOT implement:
 
@@ -659,7 +839,7 @@ Those remain later phases.
 
 ---
 
-# 19. Final Responsibility Split
+# 20. Final Responsibility Split
 
 Browser
     │

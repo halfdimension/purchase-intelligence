@@ -20,8 +20,22 @@ from crawler.phase1_ingestion_contract import (
     WatchMaterializationRequest,
 )
 from crawler.phase1_ingestion_database import (
+    TrackingRequestOwnershipLostError,
+    claim_phase1_tracking_requests,
+    get_phase1_tracking_request_state,
+    mark_phase1_tracking_request_failed,
     persist_phase1_catalog_bootstrap,
     persist_phase1_watch_materialization,
+    renew_phase1_tracking_request_lease,
+)
+from crawler.phase1_ingestion_policy import (
+    DEFAULT_PHASE1_INGESTION_LEASE_SECONDS,
+    MAX_PHASE1_INGESTION_LEASE_SECONDS,
+    MIN_PHASE1_INGESTION_LEASE_SECONDS,
+    PHASE1_INGESTION_LEASE_SECONDS_ENV,
+    Phase1IngestionPolicy,
+    load_phase1_ingestion_policy,
+    validate_phase1_ingestion_lease_seconds,
 )
 from crawler.phase1_ingestion_validation import (
     ValidatedIngestionTarget,
@@ -32,11 +46,14 @@ from crawler.phase1_ingestion_worker import (
     DUPLICATE_WATCH_ERROR_CODE,
     INVALID_PRODUCT_ERROR_CODE,
     INVALID_TARGET_ERROR_CODE,
+    LEASE_RENEWAL_OUTCOME_UNKNOWN_ERROR_CODE,
+    PROCESSING_OWNERSHIP_LOST_ERROR_CODE,
     REQUESTED_VARIANT_NOT_FOUND_ERROR_CODE,
     SCRAPE_FAILED_ERROR_CODE,
     UNSUPPORTED_ADAPTER_ERROR_CODE,
     WATCH_MATERIALIZATION_OUTCOME_UNKNOWN_ERROR_CODE,
     WATCH_MATERIALIZATION_FAILED_ERROR_CODE,
+    Phase1IngestionResult,
     PreparedIngestionRequest,
     ProcessingStateError,
     build_phase1_catalog_bootstrap_request,
@@ -67,6 +84,137 @@ class FakeSupabase:
     def rpc(self, name, params):
         self.calls.append((name, params))
         return FakeQuery(self.responses[name])
+
+
+class FakeTableQuery:
+    def __init__(self, client, table_name):
+        self.client = client
+        self.table_name = table_name
+
+    def select(self, columns):
+        self.client.calls.append(
+            ("select", self.table_name, columns)
+        )
+        return self
+
+    def update(self, payload):
+        self.client.calls.append(
+            ("update", self.table_name, payload)
+        )
+        return self
+
+    def eq(self, column, value):
+        self.client.calls.append(
+            ("eq", column, value)
+        )
+        return self
+
+    def limit(self, value):
+        self.client.calls.append(
+            ("limit", value)
+        )
+        return self
+
+    def execute(self):
+        return Mock(data=self.client.response)
+
+
+class FakeTableSupabase:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def table(self, name):
+        self.calls.append(("table", name))
+        return FakeTableQuery(self, name)
+
+
+class IngestionPolicyTest(unittest.TestCase):
+    def test_default_policy_is_explicit_and_valid(self):
+        with patch.dict(
+            "os.environ",
+            {},
+            clear=False,
+        ):
+            # Remove only the ingestion settings while preserving the
+            # process environment used by imported crawler modules.
+            import os
+
+            os.environ.pop(
+                PHASE1_INGESTION_LEASE_SECONDS_ENV,
+                None,
+            )
+            policy = load_phase1_ingestion_policy()
+
+        self.assertEqual(
+            policy,
+            Phase1IngestionPolicy(
+                lease_duration_seconds=(
+                    DEFAULT_PHASE1_INGESTION_LEASE_SECONDS
+                ),
+            ),
+        )
+        self.assertEqual(
+            policy.lease_duration_seconds,
+            600,
+        )
+
+    def test_policy_reads_valid_environment_overrides(self):
+        with patch.dict(
+            "os.environ",
+            {
+                PHASE1_INGESTION_LEASE_SECONDS_ENV: " 900 ",
+            },
+            clear=False,
+        ):
+            policy = load_phase1_ingestion_policy()
+
+        self.assertEqual(
+            policy.lease_duration_seconds,
+            900,
+        )
+
+    def test_policy_rejects_malformed_environment_values(self):
+        with patch.dict(
+            "os.environ",
+            {
+                PHASE1_INGESTION_LEASE_SECONDS_ENV: "five minutes",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                PHASE1_INGESTION_LEASE_SECONDS_ENV,
+            ):
+                load_phase1_ingestion_policy()
+
+    def test_policy_rejects_unsafe_lease_bounds(self):
+        for lease_seconds in (
+            True,
+            299,
+            1201,
+            600.0,
+        ):
+            with self.subTest(
+                lease_seconds=lease_seconds,
+            ):
+                with self.assertRaises(ValueError):
+                    validate_phase1_ingestion_lease_seconds(
+                        lease_seconds
+                    )
+
+        self.assertEqual(
+            validate_phase1_ingestion_lease_seconds(
+                MIN_PHASE1_INGESTION_LEASE_SECONDS
+            ),
+            300,
+        )
+        self.assertEqual(
+            validate_phase1_ingestion_lease_seconds(
+                MAX_PHASE1_INGESTION_LEASE_SECONDS
+            ),
+            1200,
+        )
 
 
 def make_prepared(
@@ -336,6 +484,157 @@ class NikeScraperFakeTest(unittest.TestCase):
 
 
 class IngestionDatabaseFakeTest(unittest.TestCase):
+    def test_claim_passes_explicit_lease_policy(self):
+        request_id = str(uuid4())
+        fake = FakeSupabase(
+            {
+                "claim_tracking_requests": [
+                    {
+                        "id": request_id,
+                        "status": "processing",
+                        "attempt_count": 4,
+                        "lease_expires_at": (
+                            "2026-09-05T08:10:00+00:00"
+                        ),
+                    }
+                ]
+            }
+        )
+
+        with patch(
+            "crawler.phase1_ingestion_database.get_supabase",
+            return_value=fake,
+        ):
+            claimed = claim_phase1_tracking_requests(
+                1,
+                lease_duration_seconds=600,
+            )
+
+        self.assertEqual(claimed[0]["id"], request_id)
+        self.assertEqual(
+            fake.calls,
+            [
+                (
+                    "claim_tracking_requests",
+                    {
+                        "p_limit": 1,
+                        "p_lease_duration_seconds": 600,
+                    },
+                )
+            ],
+        )
+
+    def test_current_attempt_can_renew_lease(self):
+        request_id = str(uuid4())
+        request = {
+            "id": request_id,
+            "status": "processing",
+            "attempt_count": 2,
+        }
+        renewed = {
+            **request,
+            "lease_expires_at": (
+                "2026-09-05T08:20:00+00:00"
+            ),
+        }
+        fake = FakeSupabase(
+            {
+                "renew_tracking_request_lease": [
+                    renewed
+                ]
+            }
+        )
+
+        with patch(
+            "crawler.phase1_ingestion_database.get_supabase",
+            return_value=fake,
+        ):
+            result = renew_phase1_tracking_request_lease(
+                request,
+                lease_duration_seconds=600,
+            )
+
+        self.assertEqual(result, renewed)
+        self.assertEqual(
+            fake.calls[0][1],
+            {
+                "p_tracking_request_id": request_id,
+                "p_attempt_count": 2,
+                "p_lease_duration_seconds": 600,
+            },
+        )
+
+    def test_stale_attempt_cannot_renew_or_mark_failed(self):
+        request = {
+            "id": str(uuid4()),
+            "status": "processing",
+            "attempt_count": 2,
+        }
+
+        with patch(
+            "crawler.phase1_ingestion_database.get_supabase",
+            return_value=FakeSupabase(
+                {"renew_tracking_request_lease": []}
+            ),
+        ):
+            with self.assertRaises(
+                TrackingRequestOwnershipLostError
+            ):
+                renew_phase1_tracking_request_lease(
+                    request,
+                    lease_duration_seconds=600,
+                )
+
+        fake_table = FakeTableSupabase([])
+
+        with patch(
+            "crawler.phase1_ingestion_database.get_supabase",
+            return_value=fake_table,
+        ):
+            with self.assertRaises(
+                TrackingRequestOwnershipLostError
+            ):
+                mark_phase1_tracking_request_failed(
+                    request,
+                    error_code="safe_failure",
+                    error_message="Safe failure.",
+                )
+
+        self.assertIn(
+            ("eq", "attempt_count", 2),
+            fake_table.calls,
+        )
+
+    def test_reconciliation_reads_authoritative_request_state(self):
+        request = {
+            "id": str(uuid4()),
+            "status": "processing",
+            "attempt_count": 2,
+        }
+        state = {
+            **request,
+            "status": "completed",
+            "result_product_id": str(uuid4()),
+            "result_listing_id": str(uuid4()),
+            "result_watch_id": str(uuid4()),
+            "error_code": None,
+        }
+        fake = FakeTableSupabase([state])
+
+        with patch(
+            "crawler.phase1_ingestion_database.get_supabase",
+            return_value=fake,
+        ):
+            result = get_phase1_tracking_request_state(
+                request
+            )
+
+        self.assertEqual(result, state)
+        self.assertIn(
+            ("eq", "id", request["id"]),
+            fake.calls,
+        )
+
     def test_catalog_and_materialization_rpc_contracts(self):
         product_id = str(uuid4())
         listing_id = str(uuid4())
@@ -460,6 +759,19 @@ class IngestionWorkerTest(unittest.TestCase):
             ),
         )
 
+        lease_patcher = patch(
+            "crawler.phase1_ingestion_worker."
+            "renew_phase1_tracking_request_lease",
+            return_value={
+                **self.prepared.request,
+                "lease_expires_at": (
+                    "2026-09-05T07:10:00+00:00"
+                ),
+            },
+        )
+        self.renew_lease = lease_patcher.start()
+        self.addCleanup(lease_patcher.stop)
+
     def test_happy_path_and_stable_retry_identity(self):
         bootstrap_calls = []
 
@@ -509,6 +821,10 @@ class IngestionWorkerTest(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            self.renew_lease.call_count,
+            3,
+        )
         self.assertEqual(len(bootstrap_calls), 2)
         self.assertEqual(
             bootstrap_calls[0],
@@ -1066,6 +1382,34 @@ class IngestionWorkerTest(unittest.TestCase):
         self.adapter.scrape.assert_not_called()
         mark_failed.assert_not_called()
 
+    def test_reclaimed_attempt_gets_a_new_catalog_event_identity(self):
+        original_event, _ = (
+            build_phase1_ingestion_event_identity(
+                self.prepared
+            )
+        )
+        reclaimed_request = {
+            **self.prepared.request,
+            "attempt_count": 3,
+            "started_at": (
+                "2026-09-05T07:15:00+00:00"
+            ),
+        }
+        reclaimed = replace(
+            self.prepared,
+            request=reclaimed_request,
+        )
+        reclaimed_event, _ = (
+            build_phase1_ingestion_event_identity(
+                reclaimed
+            )
+        )
+
+        self.assertNotEqual(
+            original_event,
+            reclaimed_event,
+        )
+
     def test_high_level_processor_rejects_batch_claim(self):
         with patch(
             "crawler.phase1_ingestion_worker."
@@ -1080,6 +1424,34 @@ class IngestionWorkerTest(unittest.TestCase):
                 )
 
         prepare.assert_not_called()
+
+    def test_high_level_processor_processes_one_claimed_item(self):
+        processed = Phase1IngestionResult(
+            tracking_request_id=(
+                self.prepared.request["id"]
+            ),
+            status="completed",
+        )
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "prepare_phase1_ingestion_requests",
+                return_value=[self.prepared],
+            ) as prepare,
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "process_phase1_ingestion_request",
+                return_value=processed,
+            ) as process_one,
+        ):
+            results = process_phase1_ingestion_requests()
+
+        self.assertEqual(results, [processed])
+        prepare.assert_called_once_with(1)
+        process_one.assert_called_once_with(
+            self.prepared
+        )
 
     def test_missing_requested_variant_is_persisted(self):
         bootstrap = CatalogBootstrapResult(
@@ -1170,6 +1542,405 @@ class IngestionWorkerTest(unittest.TestCase):
             ),
         )
 
+    def test_stage_boundary_renewals_surround_long_operations(self):
+        events = []
+
+        def renew(*args, **kwargs):
+            events.append("renew")
+            return {
+                **self.prepared.request,
+                "lease_expires_at": (
+                    "2026-09-05T07:10:00+00:00"
+                ),
+            }
+
+        def scrape(url):
+            events.append("scrape")
+            return self.product
+
+        def bootstrap(request):
+            events.append("bootstrap")
+            return self.bootstrap
+
+        def materialize(request):
+            events.append("materialize")
+            return self.materialization
+
+        self.renew_lease.side_effect = renew
+        adapter = replace(
+            self.adapter,
+            scrape=scrape,
+        )
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap",
+                side_effect=bootstrap,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization",
+                side_effect=materialize,
+            ),
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            events,
+            [
+                "renew",
+                "scrape",
+                "renew",
+                "bootstrap",
+                "renew",
+                "materialize",
+            ],
+        )
+
+    def test_confirmed_lease_loss_stops_before_scrape(self):
+        self.renew_lease.side_effect = (
+            TrackingRequestOwnershipLostError(
+                "attempt was reclaimed"
+            )
+        )
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=self.adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap"
+            ) as bootstrap,
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization"
+            ) as materialize,
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "ownership_lost")
+        self.assertEqual(
+            result.error_code,
+            PROCESSING_OWNERSHIP_LOST_ERROR_CODE,
+        )
+        self.adapter.scrape.assert_not_called()
+        bootstrap.assert_not_called()
+        materialize.assert_not_called()
+
+    def test_ambiguous_lease_renewal_stops_before_side_effects(self):
+        self.renew_lease.side_effect = [
+            transport_error("renew response lost"),
+            transport_error("renew retry response lost"),
+        ]
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=self.adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap"
+            ) as bootstrap,
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization"
+            ) as materialize,
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "mark_phase1_tracking_request_failed"
+            ) as mark_failed,
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "processing")
+        self.assertEqual(
+            result.error_code,
+            LEASE_RENEWAL_OUTCOME_UNKNOWN_ERROR_CODE,
+        )
+        self.assertEqual(self.renew_lease.call_count, 2)
+        self.adapter.scrape.assert_not_called()
+        bootstrap.assert_not_called()
+        materialize.assert_not_called()
+        mark_failed.assert_not_called()
+
+    def test_lease_loss_after_bootstrap_prevents_materialization(self):
+        renewed = {
+            **self.prepared.request,
+            "lease_expires_at": (
+                "2026-09-05T07:10:00+00:00"
+            ),
+        }
+        self.renew_lease.side_effect = [
+            renewed,
+            renewed,
+            TrackingRequestOwnershipLostError(
+                "attempt reclaimed after bootstrap"
+            ),
+        ]
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=self.adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap",
+                return_value=self.bootstrap,
+            ) as bootstrap,
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization"
+            ) as materialize,
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "mark_phase1_tracking_request_failed"
+            ) as mark_failed,
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "ownership_lost")
+        bootstrap.assert_called_once()
+        materialize.assert_not_called()
+        mark_failed.assert_not_called()
+
+    def test_stale_failure_is_reported_as_ownership_loss(self):
+        adapter = replace(
+            self.adapter,
+            scrape=Mock(
+                side_effect=requests.ConnectionError(
+                    "scrape failed"
+                )
+            ),
+        )
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "mark_phase1_tracking_request_failed",
+                side_effect=(
+                    TrackingRequestOwnershipLostError(
+                        "attempt was reclaimed"
+                    )
+                ),
+            ),
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "ownership_lost")
+        self.assertEqual(
+            result.error_code,
+            PROCESSING_OWNERSHIP_LOST_ERROR_CODE,
+        )
+
+    def test_stale_materialization_cannot_mark_new_attempt_failed(self):
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=self.adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap",
+                return_value=self.bootstrap,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization",
+                side_effect=api_error("attempt is stale"),
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "mark_phase1_tracking_request_failed",
+                side_effect=(
+                    TrackingRequestOwnershipLostError(
+                        "newer attempt owns request"
+                    )
+                ),
+            ) as mark_failed,
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "ownership_lost")
+        mark_failed.assert_called_once()
+
+    def test_ambiguous_materialization_reconciles_completion(self):
+        watch_id = str(uuid4())
+        committed_state = {
+            **self.prepared.request,
+            "status": "completed",
+            "result_product_id": self.bootstrap.product_id,
+            "result_listing_id": self.bootstrap.listing_id,
+            "result_watch_id": watch_id,
+            "error_code": None,
+        }
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=self.adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap",
+                return_value=self.bootstrap,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization",
+                side_effect=[
+                    transport_error("commit response lost"),
+                    transport_error("replay response lost"),
+                ],
+            ) as materialize,
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_tracking_request_state",
+                return_value=committed_state,
+            ) as reconcile,
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.watch_id, watch_id)
+        self.assertEqual(materialize.call_count, 2)
+        reconcile.assert_called_once_with(
+            self.prepared.request
+        )
+
+    def test_ambiguous_duplicate_materialization_reconciles_failure(self):
+        duplicate_state = {
+            **self.prepared.request,
+            "status": "failed",
+            "result_product_id": None,
+            "result_listing_id": None,
+            "result_watch_id": None,
+            "error_code": DUPLICATE_WATCH_ERROR_CODE,
+        }
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=self.adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap",
+                return_value=self.bootstrap,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization",
+                side_effect=[
+                    transport_error("duplicate response lost"),
+                    transport_error("duplicate replay lost"),
+                ],
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_tracking_request_state",
+                return_value=duplicate_state,
+            ),
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.error_code,
+            DUPLICATE_WATCH_ERROR_CODE,
+        )
+
+    def test_ambiguous_materialization_observes_newer_attempt_as_loss(self):
+        reclaimed_state = {
+            **self.prepared.request,
+            "status": "processing",
+            "attempt_count": (
+                self.prepared.request["attempt_count"]
+                + 1
+            ),
+            "result_product_id": None,
+            "result_listing_id": None,
+            "result_watch_id": None,
+            "error_code": None,
+        }
+
+        with (
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_ingestion_adapter",
+                return_value=self.adapter,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_catalog_bootstrap",
+                return_value=self.bootstrap,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "persist_phase1_watch_materialization",
+                side_effect=[
+                    transport_error("materialization response lost"),
+                    transport_error("materialization replay lost"),
+                ],
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "get_phase1_tracking_request_state",
+                return_value=reclaimed_state,
+            ),
+            patch(
+                "crawler.phase1_ingestion_worker."
+                "mark_phase1_tracking_request_failed"
+            ) as mark_failed,
+        ):
+            result = process_phase1_ingestion_request(
+                self.prepared
+            )
+
+        self.assertEqual(result.status, "ownership_lost")
+        self.assertEqual(
+            result.error_code,
+            PROCESSING_OWNERSHIP_LOST_ERROR_CODE,
+        )
+        mark_failed.assert_not_called()
+
     def test_unknown_materialization_outcome_stays_processing(self):
         with (
             patch(
@@ -1196,6 +1967,18 @@ class IngestionWorkerTest(unittest.TestCase):
             ),
             patch(
                 "crawler.phase1_ingestion_worker."
+                "get_phase1_tracking_request_state",
+                return_value={
+                    **self.prepared.request,
+                    "status": "processing",
+                    "result_product_id": None,
+                    "result_listing_id": None,
+                    "result_watch_id": None,
+                    "error_code": None,
+                },
+            ) as reconcile,
+            patch(
+                "crawler.phase1_ingestion_worker."
                 "mark_phase1_tracking_request_failed"
             ) as mark_failed,
         ):
@@ -1207,6 +1990,9 @@ class IngestionWorkerTest(unittest.TestCase):
         self.assertEqual(
             result.error_code,
             WATCH_MATERIALIZATION_OUTCOME_UNKNOWN_ERROR_CODE,
+        )
+        reconcile.assert_called_once_with(
+            self.prepared.request
         )
         mark_failed.assert_not_called()
 

@@ -896,8 +896,8 @@ Current intentional compatibility state:
   `POST /api/tracking-requests`
 - the trusted Phase 1 ingestion worker can now bootstrap the catalog
   and materialize the resulting watch
-- ingestion-worker production scheduling remains disabled pending a
-  stale-processing lease/reclaim/reconciliation mechanism
+- ingestion-worker production scheduling remains disabled until local
+  migration 021 passes rollback/database verification and is applied
 - legacy Phase 0 tables remain intact
 - existing price-history UI still uses the legacy `price_snapshots` history API during the migration window
 
@@ -1013,18 +1013,24 @@ Do NOT delete the Phase 0 tables yet.
 
 Phase 0 product persistence and legacy web/API compatibility remain temporarily available while the remaining application surface is migrated.
 
-Next major engineering activity is to make trusted new-product
-ingestion safely schedulable.
+Trusted new-product ingestion lease/reclaim/reconciliation is now
+implemented locally and database-verified. Migration 021 passed the
+rollback-only Supabase integration harness, rollback cleanup verification,
+and the real two-session `FOR UPDATE SKIP LOCKED` concurrency test.
+
+Permanent migration 021 application is still pending. Production ingestion
+scheduling remains disabled.
 
 Dependency order:
 
-1. implement processing lease/reclaim/reconciliation for trusted
-   ingestion
-2. verify ingestion-worker scheduling and cloud execution safely
-3. cut homepage CREATE over to `tracking_requests` and add
+1. commit the exact tested migration 021/code/docs checkpoint
+2. permanently apply the exact committed migration 021 and verify its
+   production schema/security state
+3. verify ingestion-worker scheduling and cloud execution safely
+4. cut homepage CREATE over to `tracking_requests` and add
    pending/setup UI
-4. verify the production UX
-5. retain Phase 0 compatibility until final cutover confidence
+5. verify the production UX
+6. retain Phase 0 compatibility until final cutover confidence
 
 The existing Nike crawler and Phase 1 notification pipeline should
 remain stable while ingestion reliability and the remaining frontend
@@ -1392,8 +1398,8 @@ Intentionally unchanged:
 - existing production crawler/notification behavior is unchanged
 - `crawler.run_tracked` does not yet invoke new-product ingestion
 - Phase 0 compatibility remains intact
-- production scheduling and batch claiming remain blocked until a
-  stale-processing lease/reclaim mechanism exists
+- production scheduling and batch claiming remain blocked until local
+  migration 021 passes rollback/database verification and is applied
 
 ## Milestone F — Real Ingestion and Monitoring Verification
 
@@ -1460,20 +1466,89 @@ Normal monitoring integration verification:
 
 Milestones D, E and F are complete.
 
+## Milestone G — Processing Lease, Reclaim, and Reconciliation
+
+Status: IMPLEMENTED LOCALLY; ROLLBACK/DATABASE VERIFICATION PENDING
+
+Implemented locally:
+
+- additive migration `021_phase1_tracking_request_leases.sql`
+- `tracking_requests.lease_expires_at` is the only new lease field
+- PostgreSQL time is authoritative for lease issue, expiry, and renewal
+- pre-021 processing rows with no lease become immediately reclaimable
+- pending claims and expired-processing reclaims are atomic under
+  `FOR UPDATE SKIP LOCKED`
+- pending `created_at` and expired `lease_expires_at` share one fair
+  eligibility-time order with `id` as the stable tie breaker
+- reclaim increments `attempt_count`; that count remains the fencing
+  generation for all tracking-request/watch materialization mutations
+- terminal completed, failed, and cancelled requests are excluded from
+  reclaim
+- claim/reclaim/renew RPCs are `SECURITY INVOKER`, hardened with an
+  empty search path, and executable only by `service_role`
+- lease duration is centralized in
+  `crawler/phase1_ingestion_policy.py`
+- default lease is 600 seconds, configurable from 300 through 1200
+  seconds with `PHASE1_INGESTION_LEASE_SECONDS`
+- stage-boundary renewal occurs before browser scrape, catalog
+  bootstrap, and watch materialization
+- a twice-ambiguous renewal stops the worker before further side
+  effects
+- confirmed stale renew/failure/materialization is treated as internal
+  ownership loss, not a user product failure
+- ambiguous materialization reconciles same-attempt completed or
+  duplicate-watch terminal state from `tracking_requests`
+- ambiguous catalog bootstrap remains safely reclaimable/reprocessable
+  under migration 019 idempotency and monotonic latest-state rules
+- high-level ingestion remains exactly one request per invocation
+- rollback-only PostgreSQL verification lives under `supabase/tests/`
+
+The implementation intentionally has no maximum-attempt terminalization.
+The earlier three-generation hypothesis was rejected because an expired
+attempt may have committed valid catalog state immediately before dying,
+all remaining steps are safely repeatable, and no production scheduling
+data yet supports a failure threshold. Pending rows are ordered by
+`created_at` and expired rows by `lease_expires_at`, so the oldest
+eligible work wins with `id` as a stable tie breaker. Each reclaim issues
+a fresh future deadline, preventing either a crash loop or an endless
+stream of newer pending work from permanently monopolizing the queue.
+Attempt counts must be observed during later scheduling and an
+evidence-based dead-letter policy added separately if needed.
+
+Migration 019 remains intentionally unfenced by tracking-request
+generation. If attempt N's already-running bootstrap finishes after N+1
+exists, its stable attempt event can add an older immutable observation,
+but URL/catalog uniqueness prevents duplicate listing identity and
+`checked_at` monotonic guards prevent older current-state overwrite.
+The rollback harness covers both exact-event replay and an attempt N
+making its first bootstrap only after N+1 persisted newer listing and
+variant state. No concrete corruption risk was found and migrations
+019/020 remain unchanged.
+
+Still pending:
+
+- review the exact migration/harness
+- run rollback-only verification against Supabase PostgreSQL
+- separately verify true simultaneous-session `SKIP LOCKED` behavior
+- decide whether to apply migration 021
+- verify ingestion scheduling/cloud execution only after the database
+  milestone is approved
+
 ## Exact Next Work
 
-1. implement processing lease/reclaim/reconciliation for trusted
-   ingestion
-2. verify ingestion-worker scheduling and cloud execution safely
-3. cut homepage CREATE over to `tracking_requests` and add
+1. review migration 021 and run the rollback-only database harness
+2. decide whether to apply migration 021
+3. verify ingestion-worker scheduling and cloud execution safely
+4. cut homepage CREATE over to `tracking_requests` and add
    pending/setup UI
-4. verify the production UX
-5. retain Phase 0 compatibility until final cutover confidence
+5. verify the production UX
+6. retain Phase 0 compatibility until final cutover confidence
 
-Until step 1 is complete:
+Until migration 021 is reviewed, rollback-tested, and deliberately
+applied:
 
 - do not enable production scheduling or batch ingestion
 - keep the high-level ingestion processor limited to one request per
   invocation
-- leave exhausted ambiguous transport outcomes in `processing` for
-  reconciliation
+- leave unresolved ambiguous transport outcomes in `processing` for
+  reconciliation/reclaim

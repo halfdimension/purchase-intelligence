@@ -11,14 +11,32 @@ from crawler.phase1_ingestion_contract import (
     parse_catalog_bootstrap_result,
     parse_watch_materialization_result,
 )
+from crawler.phase1_ingestion_policy import (
+    validate_phase1_ingestion_lease_seconds,
+)
 
 
 MIN_CLAIM_LIMIT = 1
 MAX_CLAIM_LIMIT = 50
 
 
+class TrackingRequestOwnershipLostError(
+    RuntimeError
+):
+    """
+    The worker's processing generation no longer owns the request.
+
+    This is an internal concurrency outcome, not a user/product
+    failure.
+    """
+
+    pass
+
+
 def claim_phase1_tracking_requests(
     limit: int = 1,
+    *,
+    lease_duration_seconds: int,
 ) -> list[dict]:
     """
     Atomically claim pending Phase 1 tracking requests.
@@ -51,6 +69,11 @@ def claim_phase1_tracking_requests(
             "between 1 and 50."
         )
 
+    lease_duration_seconds = (
+        validate_phase1_ingestion_lease_seconds(
+            lease_duration_seconds
+        )
+    )
     supabase = get_supabase()
 
     response = (
@@ -59,6 +82,9 @@ def claim_phase1_tracking_requests(
             "claim_tracking_requests",
             {
                 "p_limit": limit,
+                "p_lease_duration_seconds": (
+                    lease_duration_seconds
+                ),
             },
         )
         .execute()
@@ -113,7 +139,181 @@ def claim_phase1_tracking_requests(
                 "invalid attempt_count."
             )
 
+        lease_expires_at = row.get(
+            "lease_expires_at"
+        )
+
+        if (
+            not isinstance(
+                lease_expires_at,
+                str,
+            )
+            or not lease_expires_at.strip()
+        ):
+            raise RuntimeError(
+                "Claimed tracking request is missing "
+                "lease_expires_at."
+            )
+
+        try:
+            parsed_lease_expires_at = (
+                datetime.fromisoformat(
+                    lease_expires_at.strip().replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "Claimed tracking request has an invalid "
+                "lease_expires_at."
+            ) from exc
+
+        if parsed_lease_expires_at.tzinfo is None:
+            raise RuntimeError(
+                "Claimed tracking request lease_expires_at "
+                "must be timezone-aware."
+            )
+
     return rows
+
+
+def renew_phase1_tracking_request_lease(
+    request: dict,
+    *,
+    lease_duration_seconds: int,
+) -> dict:
+    """
+    Extend one unexpired processing lease for its exact generation.
+
+    PostgreSQL returns no row if the request is terminal, expired,
+    missing, or owned by a newer attempt. All of those outcomes mean
+    this worker must stop processing the request.
+    """
+
+    if not isinstance(request, dict):
+        raise ValueError(
+            "Tracking request must be a dictionary."
+        )
+
+    request_id = request.get("id")
+
+    if (
+        not isinstance(request_id, str)
+        or not request_id.strip()
+    ):
+        raise ValueError(
+            "Tracking request is missing its id."
+        )
+
+    attempt_count = request.get(
+        "attempt_count"
+    )
+
+    if (
+        isinstance(attempt_count, bool)
+        or not isinstance(attempt_count, int)
+        or attempt_count < 1
+    ):
+        raise ValueError(
+            "Tracking request has an invalid attempt_count."
+        )
+
+    lease_duration_seconds = (
+        validate_phase1_ingestion_lease_seconds(
+            lease_duration_seconds
+        )
+    )
+
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .rpc(
+            "renew_tracking_request_lease",
+            {
+                "p_tracking_request_id": request_id,
+                "p_attempt_count": attempt_count,
+                "p_lease_duration_seconds": (
+                    lease_duration_seconds
+                ),
+            },
+        )
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if not isinstance(rows, list):
+        raise RuntimeError(
+            "Tracking request lease renewal RPC returned "
+            "an unexpected response."
+        )
+
+    if not rows:
+        raise TrackingRequestOwnershipLostError(
+            "Tracking request processing ownership was lost."
+        )
+
+    if len(rows) != 1:
+        raise RuntimeError(
+            "Tracking request lease renewal RPC returned "
+            "an unexpected number of rows."
+        )
+
+    renewed = rows[0]
+
+    if not isinstance(renewed, dict):
+        raise RuntimeError(
+            "Tracking request lease renewal RPC returned "
+            "an invalid row."
+        )
+
+    if (
+        renewed.get("id") != request_id
+        or renewed.get("status") != "processing"
+        or renewed.get("attempt_count")
+        != attempt_count
+    ):
+        raise RuntimeError(
+            "Tracking request lease renewal RPC returned "
+            "different processing ownership."
+        )
+
+    lease_expires_at = renewed.get(
+        "lease_expires_at"
+    )
+
+    if (
+        not isinstance(lease_expires_at, str)
+        or not lease_expires_at.strip()
+    ):
+        raise RuntimeError(
+            "Renewed tracking request is missing "
+            "lease_expires_at."
+        )
+
+    try:
+        parsed_lease_expires_at = datetime.fromisoformat(
+            lease_expires_at.strip().replace(
+                "Z",
+                "+00:00",
+            )
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "Renewed tracking request has an invalid "
+            "lease_expires_at."
+        ) from exc
+
+    if parsed_lease_expires_at.tzinfo is None:
+        raise RuntimeError(
+            "Renewed tracking request lease_expires_at "
+            "must be timezone-aware."
+        )
+
+    return renewed
 
 
 MAX_ERROR_CODE_LENGTH = 64
@@ -236,6 +436,17 @@ def mark_phase1_tracking_request_failed(
 
     rows = response.data or []
 
+    if not isinstance(rows, list):
+        raise RuntimeError(
+            "Tracking request failure update returned "
+            "an unexpected response."
+        )
+
+    if not rows:
+        raise TrackingRequestOwnershipLostError(
+            "Tracking request processing ownership was lost."
+        )
+
     if len(rows) != 1:
         raise RuntimeError(
             "Expected exactly one processing tracking "
@@ -261,6 +472,133 @@ def mark_phase1_tracking_request_failed(
         )
 
     return failed
+
+
+def get_phase1_tracking_request_state(
+    request: dict,
+) -> dict:
+    """
+    Read authoritative request state after an ambiguous write.
+
+    The query intentionally filters only by durable request id. The
+    caller must compare attempt_count so a newer processing generation
+    is observed as ownership loss rather than hidden as a missing row.
+    """
+
+    if not isinstance(request, dict):
+        raise ValueError(
+            "Tracking request must be a dictionary."
+        )
+
+    request_id = request.get("id")
+
+    if (
+        not isinstance(request_id, str)
+        or not request_id.strip()
+    ):
+        raise ValueError(
+            "Tracking request is missing its id."
+        )
+
+    attempt_count = request.get(
+        "attempt_count"
+    )
+
+    if (
+        isinstance(attempt_count, bool)
+        or not isinstance(attempt_count, int)
+        or attempt_count < 1
+    ):
+        raise ValueError(
+            "Tracking request has an invalid attempt_count."
+        )
+
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .table("tracking_requests")
+        .select(
+            "id,"
+            "status,"
+            "attempt_count,"
+            "lease_expires_at,"
+            "result_product_id,"
+            "result_listing_id,"
+            "result_watch_id,"
+            "error_code,"
+            "completed_at"
+        )
+        .eq(
+            "id",
+            request_id,
+        )
+        .limit(1)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if not isinstance(rows, list):
+        raise RuntimeError(
+            "Tracking request reconciliation read returned "
+            "an unexpected response."
+        )
+
+    if not rows:
+        raise TrackingRequestOwnershipLostError(
+            "Tracking request no longer exists."
+        )
+
+    if len(rows) != 1 or not isinstance(
+        rows[0],
+        dict,
+    ):
+        raise RuntimeError(
+            "Tracking request reconciliation read returned "
+            "an unexpected number of rows."
+        )
+
+    state = rows[0]
+
+    if state.get("id") != request_id:
+        raise RuntimeError(
+            "Tracking request reconciliation read returned "
+            "a different request."
+        )
+
+    state_attempt_count = state.get(
+        "attempt_count"
+    )
+
+    if (
+        isinstance(state_attempt_count, bool)
+        or not isinstance(
+            state_attempt_count,
+            int,
+        )
+        or state_attempt_count < 1
+    ):
+        raise RuntimeError(
+            "Tracking request reconciliation read returned "
+            "an invalid attempt_count."
+        )
+
+    status = state.get("status")
+
+    if status not in {
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "cancelled",
+    }:
+        raise RuntimeError(
+            "Tracking request reconciliation read returned "
+            "an invalid status."
+        )
+
+    return state
 
 def persist_phase1_catalog_bootstrap(
     request: CatalogBootstrapRequest,

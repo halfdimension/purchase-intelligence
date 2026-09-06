@@ -20,10 +20,17 @@ from crawler.phase1_ingestion_contract import (
     WatchMaterializationRequest,
 )
 from crawler.phase1_ingestion_database import (
+    TrackingRequestOwnershipLostError,
     claim_phase1_tracking_requests,
+    get_phase1_tracking_request_state,
     mark_phase1_tracking_request_failed,
     persist_phase1_catalog_bootstrap,
     persist_phase1_watch_materialization,
+    renew_phase1_tracking_request_lease,
+)
+from crawler.phase1_ingestion_policy import (
+    Phase1IngestionPolicy,
+    load_phase1_ingestion_policy,
 )
 from crawler.phase1_ingestion_validation import (
     ValidatedIngestionTarget,
@@ -90,6 +97,14 @@ DUPLICATE_WATCH_ERROR_CODE = (
     "duplicate_watch"
 )
 
+PROCESSING_OWNERSHIP_LOST_ERROR_CODE = (
+    "processing_ownership_lost"
+)
+
+LEASE_RENEWAL_OUTCOME_UNKNOWN_ERROR_CODE = (
+    "lease_renewal_outcome_unknown"
+)
+
 INGESTION_CRAWL_EVENT_NAMESPACE = UUID(
     "05dd841c-b7b5-5a28-8fc4-9fdb040c2cc2"
 )
@@ -132,6 +147,9 @@ PersistenceResult = TypeVar(
 class PreparedIngestionRequest:
     request: dict
     target: ValidatedIngestionTarget
+    policy: Phase1IngestionPolicy = (
+        Phase1IngestionPolicy()
+    )
 
 
 @dataclass(frozen=True)
@@ -366,22 +384,248 @@ def _persist_with_one_retry(
         ) from exc
 
 
+def _ownership_lost_result(
+    request_id: str,
+) -> Phase1IngestionResult:
+    return Phase1IngestionResult(
+        tracking_request_id=request_id,
+        status="ownership_lost",
+        error_code=(
+            PROCESSING_OWNERSHIP_LOST_ERROR_CODE
+        ),
+    )
+
+
+def _renew_processing_lease(
+    prepared: PreparedIngestionRequest,
+) -> Phase1IngestionResult | None:
+    """
+    Renew the exact processing generation before a long stage.
+
+    A confirmed fence failure and an ambiguous renewal both stop this
+    worker. Only confirmed loss uses the internal ownership_lost
+    outcome; an ambiguous response leaves the authoritative row state
+    unknown and therefore reports processing without further writes.
+    """
+
+    request_id, _ = _request_identity(
+        prepared
+    )
+
+    def renew(request: dict) -> dict:
+        return renew_phase1_tracking_request_lease(
+            request,
+            lease_duration_seconds=(
+                prepared.policy.lease_duration_seconds
+            ),
+        )
+
+    try:
+        _persist_with_one_retry(
+            renew,
+            prepared.request,
+        )
+    except TrackingRequestOwnershipLostError:
+        logger.info(
+            "Tracking request %s lost processing ownership before "
+            "the next ingestion stage.",
+            request_id,
+        )
+        return _ownership_lost_result(
+            request_id
+        )
+    except AmbiguousPersistenceError:
+        logger.exception(
+            "Lease renewal outcome is unknown for tracking request %s; "
+            "stopping this worker before further side effects.",
+            request_id,
+        )
+        return Phase1IngestionResult(
+            tracking_request_id=request_id,
+            status="processing",
+            error_code=(
+                LEASE_RENEWAL_OUTCOME_UNKNOWN_ERROR_CODE
+            ),
+        )
+
+    return None
+
+
 def _persist_failure(
     prepared: PreparedIngestionRequest,
     *,
     error_code: str,
     error_message: str,
 ) -> Phase1IngestionResult:
-    failed = mark_phase1_tracking_request_failed(
-        prepared.request,
-        error_code=error_code,
-        error_message=error_message,
+    request_id, _ = _request_identity(
+        prepared
     )
+
+    try:
+        failed = mark_phase1_tracking_request_failed(
+            prepared.request,
+            error_code=error_code,
+            error_message=error_message,
+        )
+    except TrackingRequestOwnershipLostError:
+        logger.info(
+            "Tracking request %s lost processing ownership before its "
+            "failure state could be persisted.",
+            request_id,
+        )
+        return _ownership_lost_result(
+            request_id
+        )
 
     return Phase1IngestionResult(
         tracking_request_id=failed["id"],
         status="failed",
         error_code=error_code,
+    )
+
+
+def _reconcile_ambiguous_materialization(
+    prepared: PreparedIngestionRequest,
+    materialization_request: WatchMaterializationRequest,
+) -> Phase1IngestionResult:
+    """
+    Read the request row after both materialization responses were lost.
+
+    PostgreSQL commits watch creation, target creation, and request
+    terminalization atomically. A same-generation terminal row is
+    therefore authoritative. Processing means the commit is still not
+    known and must be left for lease expiry/reclaim.
+    """
+
+    request_id, attempt_count = _request_identity(
+        prepared
+    )
+
+    try:
+        state = get_phase1_tracking_request_state(
+            prepared.request
+        )
+    except TrackingRequestOwnershipLostError:
+        return _ownership_lost_result(
+            request_id
+        )
+    except (httpx.RequestError, APIError):
+        logger.exception(
+            "Tracking request %s could not be read after an ambiguous "
+            "materialization response.",
+            request_id,
+        )
+        return Phase1IngestionResult(
+            tracking_request_id=request_id,
+            status="processing",
+            product_id=(
+                materialization_request.product_id
+            ),
+            listing_id=(
+                materialization_request.listing_id
+            ),
+            error_code=(
+                WATCH_MATERIALIZATION_OUTCOME_UNKNOWN_ERROR_CODE
+            ),
+        )
+
+    if state["attempt_count"] != attempt_count:
+        return _ownership_lost_result(
+            request_id
+        )
+
+    status = state["status"]
+
+    if status == "completed":
+        if (
+            state.get("result_product_id")
+            != materialization_request.product_id
+            or state.get("result_listing_id")
+            != materialization_request.listing_id
+        ):
+            raise ProcessingStateError(
+                "Completed tracking request reconciliation returned "
+                "different catalog identities."
+            )
+
+        watch_id = state.get(
+            "result_watch_id"
+        )
+
+        if not isinstance(watch_id, str):
+            raise ProcessingStateError(
+                "Completed tracking request reconciliation is missing "
+                "its watch id."
+            )
+
+        try:
+            UUID(watch_id)
+        except ValueError as exc:
+            raise ProcessingStateError(
+                "Completed tracking request reconciliation has an "
+                "invalid watch id."
+            ) from exc
+
+        return Phase1IngestionResult(
+            tracking_request_id=request_id,
+            status="completed",
+            product_id=(
+                materialization_request.product_id
+            ),
+            listing_id=(
+                materialization_request.listing_id
+            ),
+            watch_id=watch_id,
+        )
+
+    if (
+        status == "failed"
+        and state.get("error_code")
+        == DUPLICATE_WATCH_ERROR_CODE
+    ):
+        return Phase1IngestionResult(
+            tracking_request_id=request_id,
+            status="failed",
+            product_id=(
+                materialization_request.product_id
+            ),
+            listing_id=(
+                materialization_request.listing_id
+            ),
+            error_code=DUPLICATE_WATCH_ERROR_CODE,
+        )
+
+    if status == "processing":
+        return Phase1IngestionResult(
+            tracking_request_id=request_id,
+            status="processing",
+            product_id=(
+                materialization_request.product_id
+            ),
+            listing_id=(
+                materialization_request.listing_id
+            ),
+            error_code=(
+                WATCH_MATERIALIZATION_OUTCOME_UNKNOWN_ERROR_CODE
+            ),
+        )
+
+    if status in {"failed", "cancelled"}:
+        return Phase1IngestionResult(
+            tracking_request_id=request_id,
+            status=status,
+            product_id=(
+                materialization_request.product_id
+            ),
+            listing_id=(
+                materialization_request.listing_id
+            ),
+            error_code=state.get("error_code"),
+        )
+
+    raise ProcessingStateError(
+        "Tracking request returned to an invalid state during "
+        "materialization reconciliation."
     )
 
 
@@ -439,6 +683,13 @@ def process_phase1_ingestion_request(
         )
     )
 
+    stopped = _renew_processing_lease(
+        prepared
+    )
+
+    if stopped is not None:
+        return stopped
+
     try:
         product = adapter.scrape(
             prepared.target.url
@@ -490,6 +741,13 @@ def process_phase1_ingestion_request(
                 INVALID_SCRAPED_PRODUCT_MESSAGE
             ),
         )
+
+    stopped = _renew_processing_lease(
+        prepared
+    )
+
+    if stopped is not None:
+        return stopped
 
     try:
         bootstrap = _persist_with_one_retry(
@@ -571,6 +829,13 @@ def process_phase1_ingestion_request(
         )
     )
 
+    stopped = _renew_processing_lease(
+        prepared
+    )
+
+    if stopped is not None:
+        return stopped
+
     try:
         materialization = _persist_with_one_retry(
             persist_phase1_watch_materialization,
@@ -583,14 +848,9 @@ def process_phase1_ingestion_request(
             request_id,
         )
 
-        return Phase1IngestionResult(
-            tracking_request_id=request_id,
-            status="processing",
-            product_id=bootstrap.product_id,
-            listing_id=bootstrap.listing_id,
-            error_code=(
-                WATCH_MATERIALIZATION_OUTCOME_UNKNOWN_ERROR_CODE
-            ),
+        return _reconcile_ambiguous_materialization(
+            prepared,
+            materialization_request,
         )
     except APIError:
         logger.exception(
@@ -639,6 +899,8 @@ def process_phase1_ingestion_request(
 
 def prepare_phase1_ingestion_requests(
     limit: int = 1,
+    *,
+    policy: Phase1IngestionPolicy | None = None,
 ) -> list[PreparedIngestionRequest]:
     """
     Claim pending tracking requests and validate their
@@ -653,9 +915,26 @@ def prepare_phase1_ingestion_requests(
     no catalog writes.
     """
 
+    active_policy = (
+        load_phase1_ingestion_policy()
+        if policy is None
+        else policy
+    )
+
+    if not isinstance(
+        active_policy,
+        Phase1IngestionPolicy,
+    ):
+        raise ValueError(
+            "Phase 1 ingestion policy has invalid type."
+        )
+
     claimed_requests = (
         claim_phase1_tracking_requests(
-            limit
+            limit,
+            lease_duration_seconds=(
+                active_policy.lease_duration_seconds
+            ),
         )
     )
 
@@ -671,13 +950,20 @@ def prepare_phase1_ingestion_requests(
                 )
             )
         except ValueError as exc:
-            mark_phase1_tracking_request_failed(
-                request,
-                error_code=(
-                    INVALID_TARGET_ERROR_CODE
-                ),
-                error_message=str(exc),
-            )
+            try:
+                mark_phase1_tracking_request_failed(
+                    request,
+                    error_code=(
+                        INVALID_TARGET_ERROR_CODE
+                    ),
+                    error_message=str(exc),
+                )
+            except TrackingRequestOwnershipLostError:
+                logger.info(
+                    "Tracking request %s lost processing ownership "
+                    "during target validation.",
+                    request.get("id"),
+                )
 
             continue
 
@@ -685,6 +971,7 @@ def prepare_phase1_ingestion_requests(
             PreparedIngestionRequest(
                 request=request,
                 target=target,
+                policy=active_policy,
             )
         )
 
@@ -701,8 +988,7 @@ def process_phase1_ingestion_requests(
     ):
         raise ValueError(
             "The high-level ingestion processor supports exactly one "
-            "request per invocation until processing leases can be "
-            "reclaimed safely."
+            "request per invocation."
         )
 
     prepared_requests = (
