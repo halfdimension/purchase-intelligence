@@ -1018,16 +1018,14 @@ implemented locally and database-verified. Migration 021 passed the
 rollback-only Supabase integration harness, rollback cleanup verification,
 and the real two-session `FOR UPDATE SKIP LOCKED` concurrency test.
 
-Permanent migration 021 application is still pending. Production ingestion
-scheduling remains disabled.
+Migration 021 is now permanently applied and its production
+schema/security state is verified. Production ingestion scheduling
+remains disabled.
 
 Dependency order:
 
-1. commit the exact tested migration 021/code/docs checkpoint
-2. permanently apply the exact committed migration 021 and verify its
-   production schema/security state
-3. verify ingestion-worker scheduling and cloud execution safely
-4. cut homepage CREATE over to `tracking_requests` and add
+1. verify ingestion-worker scheduling and cloud execution safely
+2. cut homepage CREATE over to `tracking_requests` and add
    pending/setup UI
 5. verify the production UX
 6. retain Phase 0 compatibility until final cutover confidence

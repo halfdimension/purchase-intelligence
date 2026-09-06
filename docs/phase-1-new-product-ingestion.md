@@ -1,13 +1,14 @@
 # Phase 1 — New Product Ingestion Architecture
 
-Status: LEASE/RECLAIM IMPLEMENTED AND DATABASE-VERIFIED;
-PERMANENT MIGRATION 021 APPLICATION AND SCHEDULING/CUTOVER PENDING
+Status: LEASE/RECLAIM IMPLEMENTED, DATABASE-VERIFIED, AND
+MIGRATION 021 APPLIED; SCHEDULING/CUTOVER PENDING
 Date: 2026-09-06
 
 Lease/reclaim status: implemented locally and verified against Supabase
 PostgreSQL with the rollback-only integration harness, rollback cleanup
 verification, and a real two-session `FOR UPDATE SKIP LOCKED`
-concurrency test. Permanent migration 021 application remains pending.
+concurrency test. Migration 021 is now permanently applied and its
+production schema/security state is verified.
 
 Read `PROJECT_CONTEXT.md`, `AGENTS.md`, and
 `docs/phase-1-domain-architecture.md` before changing this design.
@@ -445,10 +446,10 @@ materialization reconciliation are implemented locally and have passed
 rollback/database verification, including a real two-session
 `FOR UPDATE SKIP LOCKED` concurrency test.
 
-Migration 021 has not yet been permanently applied. The exact tested
-migration must be committed, permanently applied, and its production
-schema/security state verified before production ingestion scheduling
-is enabled.
+Migration 021 is now permanently applied and its production
+schema/security state is verified. Production ingestion scheduling
+remains disabled until ingestion-worker scheduling and cloud execution
+are verified safely.
 
 Later options include:
 
@@ -563,9 +564,10 @@ Implementation details:
   the rollback-only Supabase integration harness, rollback cleanup
   verification, and the real two-session `FOR UPDATE SKIP LOCKED`
   concurrency test
-- permanent migration 021 application and post-apply production
-  schema/security verification remain required before production
-  ingestion scheduling is enabled
+- migration 021 is permanently applied and post-apply production
+  schema/security verification passed
+- production ingestion scheduling remains disabled until worker
+  scheduling and cloud execution are verified safely
 
 Real Supabase PostgreSQL verification:
 
