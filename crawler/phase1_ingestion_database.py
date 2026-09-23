@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import UUID
 
 from crawler.database import get_supabase
 from crawler.phase1_ingestion_contract import (
@@ -20,6 +22,25 @@ MIN_CLAIM_LIMIT = 1
 MAX_CLAIM_LIMIT = 50
 
 
+@dataclass(frozen=True)
+class ExistingCatalogVariant:
+    canonical_variant_id: str | None
+    variant_key: str
+    active: bool
+
+
+@dataclass(frozen=True)
+class ExistingCatalogListing:
+    product_id: str
+    listing_id: str
+    active: bool
+    merchant_active: bool
+    variants: tuple[
+        ExistingCatalogVariant,
+        ...
+    ]
+
+
 class TrackingRequestOwnershipLostError(
     RuntimeError
 ):
@@ -31,6 +52,243 @@ class TrackingRequestOwnershipLostError(
     """
 
     pass
+
+
+def _existing_catalog_uuid(
+    value: object,
+    field_name: str,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+    ):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned an invalid "
+            f"{field_name}."
+        )
+
+    try:
+        UUID(value)
+    except ValueError as exc:
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned an invalid "
+            f"{field_name}."
+        ) from exc
+
+    return value
+
+
+def get_existing_phase1_catalog_listing(
+    normalized_url: str,
+    *,
+    merchant_slug: str,
+    adapter_key: str,
+) -> ExistingCatalogListing | None:
+    """
+    Read authoritative catalog identity for one normalized URL.
+
+    Inactive listings are deliberately returned rather than treated as
+    absent. The materialization RPC remains authoritative for product,
+    merchant, and listing activity, while this read prevents an existing
+    URL from being scraped and bootstrapped as if it were new.
+    """
+
+    for value, field_name in (
+        (normalized_url, "normalized_url"),
+        (merchant_slug, "merchant_slug"),
+        (adapter_key, "adapter_key"),
+    ):
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+        ):
+            raise ValueError(
+                f"{field_name} must be a nonempty trimmed string."
+            )
+
+    supabase = get_supabase()
+
+    response = (
+        supabase
+        .table("merchant_listings")
+        .select(
+            "id,"
+            "product_id,"
+            "merchant_id,"
+            "url,"
+            "active,"
+            "merchant:merchants("
+            "slug,"
+            "adapter_key,"
+            "active"
+            "),"
+            "variants:listing_variants("
+            "canonical_variant_id,"
+            "variant_key,"
+            "active"
+            ")"
+        )
+        .eq(
+            "url",
+            normalized_url,
+        )
+        .limit(2)
+        .execute()
+    )
+
+    rows = response.data
+
+    if rows is None:
+        rows = []
+
+    if not isinstance(rows, list):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned an "
+            "unexpected response."
+        )
+
+    if not rows:
+        return None
+
+    if len(rows) != 1 or not isinstance(
+        rows[0],
+        dict,
+    ):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup did not resolve "
+            "exactly one listing."
+        )
+
+    listing = rows[0]
+
+    _existing_catalog_uuid(
+        listing.get("merchant_id"),
+        "merchant_id",
+    )
+
+    if listing.get("url") != normalized_url:
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned a different URL."
+        )
+
+    listing_active = listing.get("active")
+
+    if not isinstance(listing_active, bool):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned an invalid "
+            "listing active state."
+        )
+
+    merchant = listing.get("merchant")
+
+    if not isinstance(merchant, dict):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned an invalid "
+            "merchant relationship."
+        )
+
+    if (
+        merchant.get("slug") != merchant_slug
+        or merchant.get("adapter_key") != adapter_key
+    ):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned a different "
+            "merchant identity."
+        )
+
+    merchant_active = merchant.get("active")
+
+    if not isinstance(merchant_active, bool):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned an invalid "
+            "merchant active state."
+        )
+
+    raw_variants = listing.get("variants")
+
+    if not isinstance(raw_variants, list):
+        raise RuntimeError(
+            "Existing Phase 1 catalog lookup returned invalid variants."
+        )
+
+    variants: list[ExistingCatalogVariant] = []
+    seen_variant_keys: set[str] = set()
+
+    for raw_variant in raw_variants:
+        if not isinstance(raw_variant, dict):
+            raise RuntimeError(
+                "Existing Phase 1 catalog lookup returned an invalid "
+                "variant."
+            )
+
+        variant_key = raw_variant.get(
+            "variant_key"
+        )
+
+        if (
+            not isinstance(variant_key, str)
+            or not variant_key
+            or variant_key != variant_key.strip()
+        ):
+            raise RuntimeError(
+                "Existing Phase 1 catalog lookup returned an invalid "
+                "variant_key."
+            )
+
+        if variant_key in seen_variant_keys:
+            raise RuntimeError(
+                "Existing Phase 1 catalog lookup returned duplicate "
+                "variant keys."
+            )
+
+        seen_variant_keys.add(variant_key)
+        variant_active = raw_variant.get(
+            "active"
+        )
+
+        if not isinstance(variant_active, bool):
+            raise RuntimeError(
+                "Existing Phase 1 catalog lookup returned an invalid "
+                "variant active state."
+            )
+
+        canonical_variant_id = raw_variant.get(
+            "canonical_variant_id"
+        )
+
+        if canonical_variant_id is not None:
+            canonical_variant_id = (
+                _existing_catalog_uuid(
+                    canonical_variant_id,
+                    "canonical_variant_id",
+                )
+            )
+
+        variants.append(
+            ExistingCatalogVariant(
+                canonical_variant_id=(
+                    canonical_variant_id
+                ),
+                variant_key=variant_key,
+                active=variant_active,
+            )
+        )
+
+    return ExistingCatalogListing(
+        product_id=_existing_catalog_uuid(
+            listing.get("product_id"),
+            "product_id",
+        ),
+        listing_id=_existing_catalog_uuid(
+            listing.get("id"),
+            "listing_id",
+        ),
+        active=listing_active,
+        merchant_active=merchant_active,
+        variants=tuple(variants),
+    )
 
 
 def claim_phase1_tracking_requests(

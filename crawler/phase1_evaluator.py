@@ -70,9 +70,20 @@ def find_required_variant(
         str(desired_size)
     )
 
-    for variant in product.variants:
-        if normalize_size(variant.size) == wanted:
-            return variant
+    matches = [
+        variant
+        for variant in product.variants
+        if normalize_size(variant.size) == wanted
+    ]
+
+    if len(matches) > 1:
+        raise RuntimeError(
+            "Ambiguous Phase 1 normalized size "
+            f"{wanted!r}: matched multiple scraped variants."
+        )
+
+    if matches:
+        return matches[0]
 
     return None
 

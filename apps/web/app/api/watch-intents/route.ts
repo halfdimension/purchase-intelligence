@@ -3,41 +3,10 @@ import { NextResponse } from "next/server";
 import {
   createSupabaseServerClient,
 } from "@/lib/supabase-auth-server";
-
-function normalizeSize(value: string) {
-  const normalized = value.trim().toUpperCase();
-
-  const match = normalized.match(
-    /UK\s*([0-9]+(?:\.[0-9]+)?)/,
-  );
-
-  if (match) {
-    return `UK ${match[1]}`;
-  }
-
-  return normalized;
-}
-
-function stringAttribute(
-  value: unknown,
-  key: string,
-) {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    Array.isArray(value)
-  ) {
-    return null;
-  }
-
-  const attribute = (
-    value as Record<string, unknown>
-  )[key];
-
-  return typeof attribute === "string"
-    ? attribute
-    : null;
-}
+import {
+  activePhase1VariantsForSize,
+  normalizePhase1Size,
+} from "@/lib/phase1-size-variants";
 
 export async function GET() {
   try {
@@ -389,22 +358,15 @@ export async function POST(request: Request) {
 
     if (requestedSize) {
       normalizedRequestedSize =
-        normalizeSize(requestedSize);
+        normalizePhase1Size(requestedSize);
 
-      const listingVariant =
-        (listing.variants ?? []).find(
-          (variant) =>
-            normalizeSize(
-              stringAttribute(
-                variant.attributes,
-                "size",
-              ) ??
-                variant.title ??
-                "",
-            ) === normalizedRequestedSize,
+      const matchingListingVariants =
+        activePhase1VariantsForSize(
+          listing.variants ?? [],
+          normalizedRequestedSize,
         );
 
-      if (!listingVariant) {
+      if (matchingListingVariants.length === 0) {
         return NextResponse.json(
           {
             error:
@@ -415,6 +377,21 @@ export async function POST(request: Request) {
           },
         );
       }
+
+      if (matchingListingVariants.length > 1) {
+        return NextResponse.json(
+          {
+            error:
+              `Size ${normalizedRequestedSize} maps to multiple merchant variants and cannot yet be selected unambiguously.`,
+          },
+          {
+            status: 422,
+          },
+        );
+      }
+
+      const [listingVariant] =
+        matchingListingVariants;
 
       if (
         !listingVariant.canonical_variant_id

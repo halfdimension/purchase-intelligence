@@ -1,6 +1,9 @@
+import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
-from crawler.models import ProductData
+from crawler.models import ProductData, ProductVariant
 from crawler.database import get_supabase
 
 
@@ -190,8 +193,6 @@ def normalize_size(size: str) -> str:
         UK 6 (EU 40) -> UK 6
     """
 
-    import re
-
     value = size.strip().upper()
 
     match = re.search(
@@ -213,8 +214,6 @@ def size_variant_key(size: str) -> str:
         UK 9 -> size:uk-9
     """
 
-    import re
-
     normalized = normalize_size(size)
 
     slug = re.sub(
@@ -226,6 +225,349 @@ def size_variant_key(size: str) -> str:
     return f"size:{slug}"
 
 
+@dataclass(frozen=True)
+class ResolvedSizeVariantIdentity:
+    merchant_size_label: str
+    canonical_size: str
+    variant_key: str
+    eu_size: str | None = None
+
+
+def _explicit_eu_size(
+    merchant_size_label: str,
+) -> str | None:
+    normalized_label = merchant_size_label.upper()
+    eu_markers = list(
+        re.finditer(
+            r"(?<![A-Z0-9])EU(?![A-Z])",
+            normalized_label,
+        )
+    )
+
+    if not eu_markers:
+        return None
+
+    matches = list(
+        re.finditer(
+            r"(?<![A-Z0-9])EU\s*"
+            r"([0-9]+(?:\.[0-9]+)?)(?![0-9.])",
+            normalized_label,
+        )
+    )
+
+    if len(matches) != len(eu_markers):
+        raise ValueError(
+            "Colliding size label contains malformed explicit "
+            f"EU-size information: {merchant_size_label!r}."
+        )
+
+    if len(matches) != 1:
+        raise ValueError(
+            "Colliding size label contains ambiguous explicit "
+            f"EU-size information: {merchant_size_label!r}."
+        )
+
+    match = matches[0]
+
+    if re.match(
+        r"\s*(?:/|-|&|OR\b|TO\b)\s*[0-9]",
+        normalized_label[match.end():],
+    ):
+        raise ValueError(
+            "Colliding size label contains ambiguous explicit "
+            f"EU-size information: {merchant_size_label!r}."
+        )
+
+    try:
+        value = Decimal(match.group(1))
+    except InvalidOperation as exc:
+        raise ValueError(
+            "Colliding size label contains an invalid explicit "
+            f"EU size: {merchant_size_label!r}."
+        ) from exc
+
+    if value <= 0:
+        raise ValueError(
+            "Colliding size label contains an invalid explicit "
+            f"EU size: {merchant_size_label!r}."
+        )
+
+    normalized_value = format(
+        value.normalize(),
+        "f",
+    )
+
+    return f"EU {normalized_value}"
+
+
+def resolve_size_variant_identities(
+    size_labels: list[str],
+) -> list[ResolvedSizeVariantIdentity]:
+    """
+    Resolve size identity using the complete scraped collection.
+
+    Existing base keys remain unchanged unless two or more variants
+    collide. A collision is resolved only when every member has a
+    distinct explicit EU size in its merchant label.
+    """
+
+    identities: list[ResolvedSizeVariantIdentity] = []
+    indexes_by_base_key: dict[str, list[int]] = {}
+
+    for size_label in size_labels:
+        if not isinstance(size_label, str):
+            raise ValueError(
+                "Size variant label must be a string."
+            )
+
+        merchant_size_label = size_label.strip()
+
+        if not merchant_size_label:
+            raise ValueError(
+                "Size variant label must not be empty."
+            )
+
+        canonical_size = normalize_size(
+            merchant_size_label
+        )
+        base_variant_key = size_variant_key(
+            merchant_size_label
+        )
+        index = len(identities)
+
+        identities.append(
+            ResolvedSizeVariantIdentity(
+                merchant_size_label=(
+                    merchant_size_label
+                ),
+                canonical_size=canonical_size,
+                variant_key=base_variant_key,
+            )
+        )
+        indexes_by_base_key.setdefault(
+            base_variant_key,
+            [],
+        ).append(index)
+
+    for base_variant_key, indexes in (
+        indexes_by_base_key.items()
+    ):
+        if len(indexes) == 1:
+            continue
+
+        resolved_keys: set[str] = set()
+
+        for index in indexes:
+            identity = identities[index]
+            eu_size = _explicit_eu_size(
+                identity.merchant_size_label
+            )
+
+            if eu_size is None:
+                raise ValueError(
+                    "Multiple size variants normalize to "
+                    f"{base_variant_key!r}, but distinct explicit "
+                    "EU sizes are not available for every label."
+                )
+
+            eu_slug = re.sub(
+                r"[^a-z0-9.]+",
+                "-",
+                eu_size.lower(),
+            )
+            resolved_key = (
+                f"{base_variant_key}-{eu_slug}"
+            )
+
+            if resolved_key in resolved_keys:
+                raise ValueError(
+                    "Multiple size variants still normalize to "
+                    f"the same resolved variant_key {resolved_key!r}."
+                )
+
+            resolved_keys.add(resolved_key)
+            identities[index] = (
+                ResolvedSizeVariantIdentity(
+                    merchant_size_label=(
+                        identity.merchant_size_label
+                    ),
+                    canonical_size=(
+                        identity.canonical_size
+                    ),
+                    variant_key=resolved_key,
+                    eu_size=eu_size,
+                )
+            )
+
+    seen_variant_keys: set[str] = set()
+
+    for identity in identities:
+        if identity.variant_key in seen_variant_keys:
+            raise ValueError(
+                "Multiple size variants normalize to the same "
+                f"resolved variant_key {identity.variant_key!r}."
+            )
+
+        seen_variant_keys.add(identity.variant_key)
+
+    return identities
+
+
+def _identity_for_existing_variant_key(
+    size_label: str,
+    variant_key: str,
+) -> ResolvedSizeVariantIdentity:
+    if not isinstance(size_label, str):
+        raise ValueError(
+            "Size variant label must be a string."
+        )
+
+    merchant_size_label = size_label.strip()
+
+    if not merchant_size_label:
+        raise ValueError(
+            "Size variant label must not be empty."
+        )
+
+    if (
+        not isinstance(variant_key, str)
+        or not variant_key
+        or variant_key != variant_key.strip()
+    ):
+        raise RuntimeError(
+            "Existing Phase 1 listing variant has an invalid "
+            "variant_key."
+        )
+
+    canonical_size = normalize_size(
+        merchant_size_label
+    )
+    base_variant_key = size_variant_key(
+        merchant_size_label
+    )
+
+    if variant_key == base_variant_key:
+        return ResolvedSizeVariantIdentity(
+            merchant_size_label=merchant_size_label,
+            canonical_size=canonical_size,
+            variant_key=variant_key,
+        )
+
+    collision_prefix = (
+        f"{base_variant_key}-eu-"
+    )
+
+    if not variant_key.startswith(
+        collision_prefix
+    ):
+        raise RuntimeError(
+            "Existing Phase 1 listing variant key is incompatible "
+            f"with scraped size label {merchant_size_label!r}."
+        )
+
+    stored_eu_token = variant_key[
+        len(collision_prefix):
+    ]
+
+    if re.fullmatch(
+        r"[0-9]+(?:\.[0-9]+)?",
+        stored_eu_token,
+    ) is None:
+        raise RuntimeError(
+            "Existing Phase 1 listing variant has an invalid "
+            "collision-disambiguated variant_key."
+        )
+
+    try:
+        stored_eu_value = Decimal(
+            stored_eu_token
+        )
+    except InvalidOperation as exc:
+        raise RuntimeError(
+            "Existing Phase 1 listing variant has an invalid "
+            "collision-disambiguated variant_key."
+        ) from exc
+
+    if stored_eu_value <= 0:
+        raise RuntimeError(
+            "Existing Phase 1 listing variant has an invalid "
+            "collision-disambiguated variant_key."
+        )
+
+    normalized_stored_eu = format(
+        stored_eu_value.normalize(),
+        "f",
+    )
+
+    if (
+        variant_key
+        != f"{collision_prefix}{normalized_stored_eu}"
+    ):
+        raise RuntimeError(
+            "Existing Phase 1 listing variant has a non-canonical "
+            "collision-disambiguated variant_key."
+        )
+
+    eu_size = f"EU {normalized_stored_eu}"
+    try:
+        explicit_eu_size = _explicit_eu_size(
+            merchant_size_label
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "Scraped size label has ambiguous explicit EU identity "
+            "for its existing Phase 1 listing variant."
+        ) from exc
+
+    if (
+        explicit_eu_size is not None
+        and explicit_eu_size != eu_size
+    ):
+        raise RuntimeError(
+            "Existing Phase 1 listing variant EU identity is "
+            f"incompatible with scraped size label "
+            f"{merchant_size_label!r}."
+        )
+
+    return ResolvedSizeVariantIdentity(
+        merchant_size_label=merchant_size_label,
+        canonical_size=canonical_size,
+        variant_key=variant_key,
+        eu_size=eu_size,
+    )
+
+
+def _select_phase1_listing_variants(
+    supabase,
+    *,
+    listing_id: str,
+    identity_column: str,
+    identity_value: str,
+) -> list[dict]:
+    response = (
+        supabase
+        .table("listing_variants")
+        .select(
+            "id,"
+            "canonical_variant_id,"
+            "external_sku,"
+            "variant_key"
+        )
+        .eq(
+            "listing_id",
+            listing_id,
+        )
+        .eq(
+            identity_column,
+            identity_value,
+        )
+        .limit(2)
+        .execute()
+    )
+
+    return response.data or []
+
+
 def upsert_phase1_listing_variants(
     product: ProductData,
     listing: dict,
@@ -234,6 +576,9 @@ def upsert_phase1_listing_variants(
     """
     Update latest merchant-specific variant state for an
     existing Phase 1 listing.
+
+    A known merchant SKU anchors the already-persisted listing
+    variant. The SKU is never incorporated into canonical identity.
     """
 
     listing_id = listing.get("id")
@@ -257,56 +602,167 @@ def upsert_phase1_listing_variants(
     supabase = get_supabase()
 
     saved_variants: list[dict] = []
+    existing_by_index: list[dict | None] = []
+    seen_external_skus: set[str] = set()
+    needs_normalized_fallback = False
 
     for variant in product.variants:
-        normalized_size = normalize_size(
-            variant.size
+        external_sku = (
+            variant.sku.strip()
+            if isinstance(variant.sku, str)
+            and variant.sku.strip()
+            else None
         )
 
-        variant_key = size_variant_key(
-            variant.size
-        )
+        if external_sku is None:
+            existing_by_index.append(None)
+            needs_normalized_fallback = True
+            continue
 
-        existing_response = (
-            supabase
-            .table("listing_variants")
-            .select(
-                "id,"
-                "canonical_variant_id,"
-                "variant_key"
-            )
-            .eq(
-                "listing_id",
-                listing_id,
-            )
-            .eq(
-                "variant_key",
-                variant_key,
-            )
-            .limit(2)
-            .execute()
-        )
-
-        existing_rows = (
-            existing_response.data or []
-        )
-
-        if len(existing_rows) != 1:
+        if external_sku in seen_external_skus:
             raise RuntimeError(
-                "Expected exactly one existing Phase 1 "
-                f"listing variant for {variant_key!r}, "
+                "Scraped Phase 1 variants contain duplicate "
+                f"external SKU {external_sku!r}."
+            )
+
+        seen_external_skus.add(external_sku)
+        existing_rows = _select_phase1_listing_variants(
+            supabase,
+            listing_id=listing_id,
+            identity_column="external_sku",
+            identity_value=external_sku,
+        )
+
+        if len(existing_rows) > 1:
+            raise RuntimeError(
+                "Expected at most one existing Phase 1 "
+                f"listing variant for external SKU {external_sku!r}, "
                 f"found {len(existing_rows)}."
             )
 
-        existing = existing_rows[0]
+        existing = (
+            existing_rows[0]
+            if existing_rows
+            else None
+        )
+        existing_by_index.append(existing)
+
+        if existing is None:
+            needs_normalized_fallback = True
+
+    fallback_identities = (
+        resolve_size_variant_identities(
+            [variant.size for variant in product.variants]
+        )
+        if needs_normalized_fallback
+        else None
+    )
+    resolved_variants: list[
+        tuple[
+            ProductVariant,
+            ResolvedSizeVariantIdentity,
+            dict,
+        ]
+    ] = []
+    matched_listing_variant_ids: set[str] = set()
+
+    for index, (variant, existing) in enumerate(
+        zip(
+            product.variants,
+            existing_by_index,
+            strict=True,
+        )
+    ):
+        if existing is None:
+            if fallback_identities is None:
+                raise RuntimeError(
+                    "Phase 1 variant fallback identity is missing."
+                )
+
+            identity = fallback_identities[index]
+            existing_rows = _select_phase1_listing_variants(
+                supabase,
+                listing_id=listing_id,
+                identity_column="variant_key",
+                identity_value=identity.variant_key,
+            )
+
+            if len(existing_rows) != 1:
+                raise RuntimeError(
+                    "Expected exactly one existing Phase 1 "
+                    "listing variant for "
+                    f"{identity.variant_key!r}, found "
+                    f"{len(existing_rows)}."
+                )
+
+            existing = existing_rows[0]
+        else:
+            existing_variant_key = existing.get(
+                "variant_key"
+            )
+
+            if (
+                not isinstance(existing_variant_key, str)
+                or not existing_variant_key.strip()
+            ):
+                raise RuntimeError(
+                    "Existing Phase 1 listing variant is missing "
+                    "its variant_key."
+                )
+
+            identity = _identity_for_existing_variant_key(
+                variant.size,
+                existing_variant_key,
+            )
+
+        existing_id = existing.get("id")
+
+        if (
+            not isinstance(existing_id, str)
+            or not existing_id.strip()
+        ):
+            raise RuntimeError(
+                "Existing Phase 1 listing variant is missing its id."
+            )
+
+        if existing_id in matched_listing_variant_ids:
+            raise RuntimeError(
+                "Multiple scraped variants resolved to the same "
+                "existing Phase 1 listing variant."
+            )
+
+        matched_listing_variant_ids.add(existing_id)
+        resolved_variants.append(
+            (
+                variant,
+                identity,
+                existing,
+            )
+        )
+
+    for variant, identity, existing in resolved_variants:
+        variant_key = identity.variant_key
+        external_sku = (
+            variant.sku.strip()
+            if isinstance(variant.sku, str)
+            and variant.sku.strip()
+            else None
+        )
+
+        attributes = {
+            "size": identity.canonical_size,
+            "merchant_size_label": (
+                identity.merchant_size_label
+            ),
+        }
+
+        if identity.eu_size is not None:
+            attributes["eu_size"] = identity.eu_size
 
         payload = {
-            "external_sku": variant.sku,
-            "title": variant.size,
-            "attributes": {
-                "size": normalized_size,
-                "merchant_size_label": variant.size,
-            },
+            "external_sku": external_sku,
+            "title": identity.merchant_size_label,
+            "attributes": attributes,
             "current_mrp": variant.mrp,
             "current_price": variant.current_price,
             "currency": product.currency or "INR",
@@ -351,6 +807,9 @@ def insert_phase1_variant_observations(
     """
     Persist one immutable historical observation for each
     merchant-specific Phase 1 listing variant.
+
+    Saved listing variants supply authoritative variant keys;
+    external SKU or exact merchant label only associates source data.
     """
 
     if checked_at is None:
@@ -358,16 +817,143 @@ def insert_phase1_variant_observations(
             timezone.utc
         ).isoformat()
 
-    variants_by_key = {
-        size_variant_key(variant.size): variant
-        for variant in product.variants
-    }
+    variants_by_sku: dict[str, list[ProductVariant]] = {}
+    variants_by_label: dict[
+        str,
+        list[ProductVariant],
+    ] = {}
+
+    for variant in product.variants:
+        external_sku = (
+            variant.sku.strip()
+            if isinstance(variant.sku, str)
+            and variant.sku.strip()
+            else None
+        )
+        if not isinstance(variant.size, str):
+            raise RuntimeError(
+                "Scraped Phase 1 variant size must be a string."
+            )
+
+        merchant_size_label = variant.size.strip()
+
+        if not merchant_size_label:
+            raise RuntimeError(
+                "Scraped Phase 1 variant size must not be empty."
+            )
+
+        if external_sku is not None:
+            variants_by_sku.setdefault(
+                external_sku,
+                [],
+            ).append(variant)
+
+        variants_by_label.setdefault(
+            merchant_size_label,
+            [],
+        ).append(variant)
+
+    matched_source_ids: set[int] = set()
+    variant_pairs: list[
+        tuple[dict, ProductVariant]
+    ] = []
+
+    for saved_variant in saved_variants:
+        external_sku = saved_variant.get(
+            "external_sku"
+        )
+        normalized_external_sku = (
+            external_sku.strip()
+            if isinstance(external_sku, str)
+            and external_sku.strip()
+            else None
+        )
+
+        if normalized_external_sku is not None:
+            candidates = variants_by_sku.get(
+                normalized_external_sku,
+                [],
+            )
+            identity_description = (
+                "external SKU "
+                f"{normalized_external_sku!r}"
+            )
+        else:
+            attributes = saved_variant.get(
+                "attributes"
+            )
+            attribute_label = (
+                attributes.get(
+                    "merchant_size_label"
+                )
+                if isinstance(attributes, dict)
+                else None
+            )
+            raw_label = (
+                attribute_label
+                if isinstance(attribute_label, str)
+                and attribute_label.strip()
+                else saved_variant.get("title")
+            )
+            merchant_size_label = (
+                raw_label.strip()
+                if isinstance(raw_label, str)
+                and raw_label.strip()
+                else None
+            )
+
+            if merchant_size_label is None:
+                raise RuntimeError(
+                    "Phase 1 listing variant without an external "
+                    "SKU is missing its merchant size label."
+                )
+
+            candidates = variants_by_label.get(
+                merchant_size_label,
+                [],
+            )
+            identity_description = (
+                "merchant size label "
+                f"{merchant_size_label!r}"
+            )
+
+        if len(candidates) != 1:
+            raise RuntimeError(
+                "Expected exactly one scraped variant for saved "
+                f"{identity_description}, found {len(candidates)}."
+            )
+
+        source_variant = candidates[0]
+        source_id = id(source_variant)
+
+        if source_id in matched_source_ids:
+            raise RuntimeError(
+                "Multiple saved Phase 1 listing variants resolved "
+                "to the same scraped variant."
+            )
+
+        matched_source_ids.add(source_id)
+        variant_pairs.append(
+            (
+                saved_variant,
+                source_variant,
+            )
+        )
+
+    if (
+        len(variant_pairs) != len(product.variants)
+        or len(matched_source_ids) != len(product.variants)
+    ):
+        raise RuntimeError(
+            "Saved and scraped Phase 1 variants do not form a "
+            "complete one-to-one association."
+        )
 
     supabase = get_supabase()
 
     observations: list[dict] = []
 
-    for saved_variant in saved_variants:
+    for saved_variant, source_variant in variant_pairs:
         variant_key = saved_variant.get(
             "variant_key"
         )
@@ -385,16 +971,6 @@ def insert_phase1_variant_observations(
             raise RuntimeError(
                 "Phase 1 listing variant is missing its "
                 "variant_key."
-            )
-
-        source_variant = variants_by_key.get(
-            variant_key
-        )
-
-        if source_variant is None:
-            raise RuntimeError(
-                "Could not match scraped variant to saved "
-                f"Phase 1 variant {variant_key!r}."
             )
 
         payload = {

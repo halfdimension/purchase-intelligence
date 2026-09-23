@@ -1,7 +1,6 @@
 from crawler.models import ProductData
 from crawler.phase1_database import (
-    normalize_size,
-    size_variant_key,
+    resolve_size_variant_identities,
 )
 from crawler.scrapers.nike_url import (
     nike_india_product_id,
@@ -90,13 +89,16 @@ def build_nike_catalog_product_payload(
                 "Nike variant size must not be empty."
             )
 
-        canonical_size = normalize_size(
-            merchant_size_label
-        )
+    resolved_identities = resolve_size_variant_identities(
+        [variant.size for variant in product.variants]
+    )
 
-        variant_key = size_variant_key(
-            merchant_size_label
-        )
+    for variant, identity in zip(
+        product.variants,
+        resolved_identities,
+        strict=True,
+    ):
+        variant_key = identity.variant_key
 
         if variant_key in seen_variant_keys:
             raise ValueError(
@@ -108,25 +110,40 @@ def build_nike_catalog_product_payload(
             variant_key
         )
 
+        canonical_attributes = {
+            "size": identity.canonical_size,
+        }
+        listing_attributes = {
+            "size": identity.canonical_size,
+            "merchant_size_label": (
+                identity.merchant_size_label
+            ),
+        }
+
+        if identity.eu_size is not None:
+            canonical_attributes["eu_size"] = (
+                identity.eu_size
+            )
+            listing_attributes["eu_size"] = (
+                identity.eu_size
+            )
+
         normalized_variants.append(
             {
                 "variant_key": variant_key,
                 "canonical_title": (
-                    canonical_size
+                    identity.canonical_size
                 ),
-                "canonical_attributes": {
-                    "size": canonical_size,
-                },
+                "canonical_attributes": (
+                    canonical_attributes
+                ),
                 "external_sku": variant.sku,
                 "listing_title": (
-                    merchant_size_label
+                    identity.merchant_size_label
                 ),
-                "listing_attributes": {
-                    "size": canonical_size,
-                    "merchant_size_label": (
-                        merchant_size_label
-                    ),
-                },
+                "listing_attributes": (
+                    listing_attributes
+                ),
                 "mrp": variant.mrp,
                 "current_price": (
                     variant.current_price

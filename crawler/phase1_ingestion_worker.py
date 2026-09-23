@@ -20,8 +20,10 @@ from crawler.phase1_ingestion_contract import (
     WatchMaterializationRequest,
 )
 from crawler.phase1_ingestion_database import (
+    ExistingCatalogListing,
     TrackingRequestOwnershipLostError,
     claim_phase1_tracking_requests,
+    get_existing_phase1_catalog_listing,
     get_phase1_tracking_request_state,
     mark_phase1_tracking_request_failed,
     persist_phase1_catalog_bootstrap,
@@ -73,6 +75,14 @@ CATALOG_BOOTSTRAP_FAILED_ERROR_CODE = (
     "catalog_bootstrap_failed"
 )
 
+CATALOG_LOOKUP_FAILED_ERROR_CODE = (
+    "catalog_lookup_failed"
+)
+
+CATALOG_LOOKUP_UNAVAILABLE_ERROR_CODE = (
+    "catalog_lookup_unavailable"
+)
+
 INVALID_VARIANT_REQUIREMENTS_ERROR_CODE = (
     "invalid_variant_requirements"
 )
@@ -112,6 +122,11 @@ INGESTION_CRAWL_EVENT_NAMESPACE = UUID(
 INTERNAL_CATALOG_FAILURE_MESSAGE = (
     "We could not save this product safely. An operator must review "
     "the request."
+)
+
+INTERNAL_CATALOG_LOOKUP_FAILURE_MESSAGE = (
+    "We could not resolve this product safely. An operator must "
+    "review the request."
 )
 
 INTERNAL_WATCH_FAILURE_MESSAGE = (
@@ -322,7 +337,10 @@ def build_phase1_catalog_bootstrap_request(
 def resolve_phase1_requested_variant(
     prepared: PreparedIngestionRequest,
     adapter: Phase1IngestionAdapter,
-    bootstrap: CatalogBootstrapResult,
+    catalog: (
+        CatalogBootstrapResult
+        | ExistingCatalogListing
+    ),
 ) -> tuple[str | None, str | None]:
     variant_requirements = prepared.request.get(
         "variant_requirements"
@@ -343,22 +361,79 @@ def resolve_phase1_requested_variant(
     if variant_key is None:
         return None, None
 
+    variants = catalog.variants
+
+    if isinstance(
+        catalog,
+        ExistingCatalogListing,
+    ):
+        variants = tuple(
+            variant
+            for variant in variants
+            if variant.active
+        )
+
     matches = [
         variant
-        for variant in bootstrap.variants
-        if variant.variant_key == variant_key
+        for variant in variants
+        if (
+            variant.variant_key == variant_key
+            or variant.variant_key.startswith(
+                f"{variant_key}-eu-"
+            )
+        )
     ]
 
-    if len(matches) != 1:
+    if not matches:
         raise LookupError(
-            "Requested variant was not found in the scraped listing: "
+            "Requested variant was not found in the merchant listing: "
             f"{variant_key!r}."
+        )
+
+    if len(matches) > 1:
+        raise ValueError(
+            "Requested size maps to multiple merchant variants "
+            "and cannot be selected unambiguously."
+        )
+
+    if matches[0].canonical_variant_id is None:
+        raise LookupError(
+            "Requested existing listing variant is not linked to a "
+            "canonical variant."
         )
 
     return (
         matches[0].canonical_variant_id,
-        variant_key,
+        matches[0].variant_key,
     )
+
+
+def _read_existing_catalog_with_one_retry(
+    prepared: PreparedIngestionRequest,
+) -> ExistingCatalogListing | None:
+    def read_catalog() -> (
+        ExistingCatalogListing | None
+    ):
+        return get_existing_phase1_catalog_listing(
+            prepared.target.url,
+            merchant_slug=(
+                prepared.target.merchant_slug
+            ),
+            adapter_key=(
+                prepared.target.adapter_key
+            ),
+        )
+
+    try:
+        return read_catalog()
+    except httpx.RequestError:
+        logger.warning(
+            "Catalog lookup transport failed; retrying the exact "
+            "read once.",
+            exc_info=True,
+        )
+
+    return read_catalog()
 
 
 def _persist_with_one_retry(
@@ -482,6 +557,70 @@ def _persist_failure(
         status="failed",
         error_code=error_code,
     )
+
+
+def _lookup_existing_catalog_for_processing(
+    prepared: PreparedIngestionRequest,
+    *,
+    stage: str,
+) -> tuple[
+    ExistingCatalogListing | None,
+    Phase1IngestionResult | None,
+]:
+    request_id, _ = _request_identity(
+        prepared
+    )
+
+    try:
+        catalog = (
+            _read_existing_catalog_with_one_retry(
+                prepared
+            )
+        )
+    except httpx.RequestError:
+        logger.exception(
+            "Catalog lookup remained unavailable during %s for "
+            "tracking request %s; stopping before catalog side "
+            "effects.",
+            stage,
+            request_id,
+        )
+
+        return None, Phase1IngestionResult(
+            tracking_request_id=request_id,
+            status="processing",
+            error_code=(
+                CATALOG_LOOKUP_UNAVAILABLE_ERROR_CODE
+            ),
+        )
+    except APIError:
+        logger.exception(
+            "Catalog lookup was rejected during %s for tracking "
+            "request %s.",
+            stage,
+            request_id,
+        )
+
+        return None, _persist_failure(
+            prepared,
+            error_code=(
+                CATALOG_LOOKUP_FAILED_ERROR_CODE
+            ),
+            error_message=(
+                INTERNAL_CATALOG_LOOKUP_FAILURE_MESSAGE
+            ),
+        )
+    except RuntimeError:
+        logger.exception(
+            "Catalog lookup contract failed during %s for tracking "
+            "request %s.",
+            stage,
+            request_id,
+        )
+
+        raise
+
+    return catalog, None
 
 
 def _reconcile_ambiguous_materialization(
@@ -690,112 +829,159 @@ def process_phase1_ingestion_request(
     if stopped is not None:
         return stopped
 
-    try:
-        product = adapter.scrape(
-            prepared.target.url
-        )
-    except SCRAPER_EXCEPTIONS:
-        logger.exception(
-            "Supported merchant scrape failed for tracking request %s.",
-            request_id,
-        )
-
-        return _persist_failure(
+    catalog, lookup_failure = (
+        _lookup_existing_catalog_for_processing(
             prepared,
-            error_code=(
-                SCRAPE_FAILED_ERROR_CODE
-            ),
-            error_message=(
-                INTERNAL_SCRAPE_FAILURE_MESSAGE
-            ),
+            stage="initial catalog lookup",
         )
-
-    try:
-        adapter.validate_scraped_product(
-            prepared.target.url,
-            product,
-        )
-
-        bootstrap_request = (
-            build_phase1_catalog_bootstrap_request(
-                prepared,
-                product,
-                crawl_event_id=(
-                    crawl_event_id
-                ),
-                checked_at=checked_at,
-            )
-        )
-    except ValueError:
-        logger.exception(
-            "Scraped product validation failed for tracking request %s.",
-            request_id,
-        )
-
-        return _persist_failure(
-            prepared,
-            error_code=(
-                INVALID_PRODUCT_ERROR_CODE
-            ),
-            error_message=(
-                INVALID_SCRAPED_PRODUCT_MESSAGE
-            ),
-        )
-
-    stopped = _renew_processing_lease(
-        prepared
     )
 
-    if stopped is not None:
-        return stopped
+    if lookup_failure is not None:
+        return lookup_failure
 
-    try:
-        bootstrap = _persist_with_one_retry(
-            persist_phase1_catalog_bootstrap,
-            bootstrap_request,
-        )
-    except AmbiguousPersistenceError:
-        logger.exception(
-            "Catalog bootstrap outcome is unknown for tracking request %s.",
-            request_id,
+    if catalog is None:
+        try:
+            product = adapter.scrape(
+                prepared.target.url
+            )
+        except SCRAPER_EXCEPTIONS:
+            logger.exception(
+                "Supported merchant scrape failed for tracking "
+                "request %s.",
+                request_id,
+            )
+
+            return _persist_failure(
+                prepared,
+                error_code=(
+                    SCRAPE_FAILED_ERROR_CODE
+                ),
+                error_message=(
+                    INTERNAL_SCRAPE_FAILURE_MESSAGE
+                ),
+            )
+
+        try:
+            adapter.validate_scraped_product(
+                prepared.target.url,
+                product,
+            )
+
+            bootstrap_request = (
+                build_phase1_catalog_bootstrap_request(
+                    prepared,
+                    product,
+                    crawl_event_id=(
+                        crawl_event_id
+                    ),
+                    checked_at=checked_at,
+                )
+            )
+        except ValueError:
+            logger.exception(
+                "Scraped product validation failed for tracking "
+                "request %s.",
+                request_id,
+            )
+
+            return _persist_failure(
+                prepared,
+                error_code=(
+                    INVALID_PRODUCT_ERROR_CODE
+                ),
+                error_message=(
+                    INVALID_SCRAPED_PRODUCT_MESSAGE
+                ),
+            )
+
+        stopped = _renew_processing_lease(
+            prepared
         )
 
-        return Phase1IngestionResult(
-            tracking_request_id=request_id,
-            status="processing",
-            error_code=(
-                CATALOG_BOOTSTRAP_OUTCOME_UNKNOWN_ERROR_CODE
-            ),
-        )
-    except APIError:
-        logger.exception(
-            "Catalog bootstrap was rejected for tracking request %s.",
-            request_id,
+        if stopped is not None:
+            return stopped
+
+        catalog, lookup_failure = (
+            _lookup_existing_catalog_for_processing(
+                prepared,
+                stage="pre-bootstrap catalog lookup",
+            )
         )
 
-        return _persist_failure(
-            prepared,
-            error_code=(
-                CATALOG_BOOTSTRAP_FAILED_ERROR_CODE
-            ),
-            error_message=(
-                INTERNAL_CATALOG_FAILURE_MESSAGE
-            ),
-        )
-    except RuntimeError:
-        logger.exception(
-            "Catalog bootstrap contract failed for tracking request %s.",
-            request_id,
-        )
+        if lookup_failure is not None:
+            return lookup_failure
 
-        raise
+        if catalog is None:
+            try:
+                catalog = _persist_with_one_retry(
+                    persist_phase1_catalog_bootstrap,
+                    bootstrap_request,
+                )
+            except AmbiguousPersistenceError:
+                logger.exception(
+                    "Catalog bootstrap outcome is unknown for tracking "
+                    "request %s.",
+                    request_id,
+                )
+
+                return Phase1IngestionResult(
+                    tracking_request_id=request_id,
+                    status="processing",
+                    error_code=(
+                        CATALOG_BOOTSTRAP_OUTCOME_UNKNOWN_ERROR_CODE
+                    ),
+                )
+            except APIError:
+                logger.exception(
+                    "Catalog bootstrap was rejected for tracking "
+                    "request %s; reconciling authoritative catalog "
+                    "state.",
+                    request_id,
+                )
+
+                catalog, lookup_failure = (
+                    _lookup_existing_catalog_for_processing(
+                        prepared,
+                        stage=(
+                            "catalog bootstrap reconciliation"
+                        ),
+                    )
+                )
+
+                if lookup_failure is not None:
+                    return lookup_failure
+
+                if catalog is None:
+                    return _persist_failure(
+                        prepared,
+                        error_code=(
+                            CATALOG_BOOTSTRAP_FAILED_ERROR_CODE
+                        ),
+                        error_message=(
+                            INTERNAL_CATALOG_FAILURE_MESSAGE
+                        ),
+                    )
+
+                logger.info(
+                    "Tracking request %s reconciled a concurrent "
+                    "catalog bootstrap.",
+                    request_id,
+                )
+            except RuntimeError:
+                logger.exception(
+                    "Catalog bootstrap contract failed for tracking "
+                    "request %s.",
+                    request_id,
+                )
+
+                raise
 
     try:
         canonical_variant_id, variant_key = (
             resolve_phase1_requested_variant(
                 prepared,
                 adapter,
-                bootstrap,
+                catalog,
             )
         )
     except ValueError as exc:
@@ -819,8 +1005,8 @@ def process_phase1_ingestion_request(
         WatchMaterializationRequest(
             tracking_request_id=request_id,
             attempt_count=attempt_count,
-            product_id=bootstrap.product_id,
-            listing_id=bootstrap.listing_id,
+            product_id=catalog.product_id,
+            listing_id=catalog.listing_id,
             normalized_url=prepared.target.url,
             canonical_variant_id=(
                 canonical_variant_id
@@ -882,8 +1068,8 @@ def process_phase1_ingestion_request(
         return Phase1IngestionResult(
             tracking_request_id=request_id,
             status="failed",
-            product_id=bootstrap.product_id,
-            listing_id=bootstrap.listing_id,
+            product_id=catalog.product_id,
+            listing_id=catalog.listing_id,
             watch_id=materialization.watch_id,
             error_code=DUPLICATE_WATCH_ERROR_CODE,
         )
