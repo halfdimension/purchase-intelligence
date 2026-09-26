@@ -322,6 +322,7 @@ export async function POST(request: Request) {
         {
           error:
             "This product has not been indexed in the Phase 1 catalog yet.",
+          error_code: "listing_not_indexed",
         },
         {
           status: 422,

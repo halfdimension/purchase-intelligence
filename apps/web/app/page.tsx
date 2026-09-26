@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 
 import { ProductPriceHistory } from "@/app/components/ProductPriceHistory";
 import {
@@ -8,6 +8,31 @@ import {
   type Phase1WatchIntent,
   type WatchlistItem,
 } from "@/lib/watch-intent-ui";
+
+type TrackingRequest = {
+  id: string;
+  requested_url: string;
+  normalized_url: string;
+  variant_requirements: Record<string, unknown>;
+  target_price: number | null;
+  target_currency: string;
+  status: string;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+  result_watch_id: string | null;
+};
+
+function isActiveTrackingRequest(request: TrackingRequest) {
+  return request.status === "pending" || request.status === "processing";
+}
+
+function getRequestedSize(request: TrackingRequest) {
+  const requestedSize = request.variant_requirements.size;
+
+  return typeof requestedSize === "string" ? requestedSize : null;
+}
 
 function formatPrice(
   value: number | null,
@@ -63,35 +88,41 @@ export default function Home() {
   const [productUrl, setProductUrl] = useState("");
   const [size, setSize] = useState("");
   const [targetPrice, setTargetPrice] = useState("");
-  const [email, setEmail] = useState("");
 
   const [products, setProducts] = useState<WatchlistItem[]>([]);
+  const [trackingRequests, setTrackingRequests] = useState<
+    TrackingRequest[]
+  >([]);
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
+  const loadWatchlist = useCallback(async () => {
+    const response = await fetch("/api/watch-intents");
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to load watchlist.");
+    }
+
+    if (!Array.isArray(data.watches)) {
+      throw new Error("Invalid watchlist response.");
+    }
+
+    setProducts(
+      (data.watches as Phase1WatchIntent[]).map(
+        mapPhase1WatchToWatchlistItem,
+      ),
+    );
+  }, []);
+
   useEffect(() => {
-    async function loadWatchlist() {
+    async function loadInitialWatchlist() {
       try {
-        const response = await fetch("/api/watch-intents");
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || "Failed to load watchlist.");
-        }
-
-        if (!Array.isArray(data.watches)) {
-          throw new Error("Invalid watchlist response.");
-        }
-
-        setProducts(
-          (data.watches as Phase1WatchIntent[]).map(
-            mapPhase1WatchToWatchlistItem,
-          ),
-        );
+        await loadWatchlist();
       } catch (err) {
         setError(
           err instanceof Error
@@ -100,6 +131,32 @@ export default function Home() {
         );
       } finally {
         setLoading(false);
+      }
+    }
+
+    async function loadTrackingRequests() {
+      try {
+        const response = await fetch("/api/tracking-requests");
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.error || "Failed to load product setup requests.",
+          );
+        }
+
+        if (!Array.isArray(data.requests)) {
+          throw new Error("Invalid product setup response.");
+        }
+
+        setTrackingRequests(data.requests as TrackingRequest[]);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Failed to load product setup requests.",
+        );
       }
     }
 
@@ -125,9 +182,97 @@ export default function Home() {
       }
     }
 
-    loadWatchlist();
+    loadInitialWatchlist();
+    loadTrackingRequests();
     loadProfile();
-  }, []);
+  }, [loadWatchlist]);
+
+  useEffect(() => {
+    const activeRequestIds = new Set(
+      trackingRequests
+        .filter(isActiveTrackingRequest)
+        .map((request) => request.id),
+    );
+
+    if (activeRequestIds.size === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    let polling = false;
+
+    async function pollTrackingRequests() {
+      if (polling) {
+        return;
+      }
+
+      polling = true;
+
+      try {
+        const response = await fetch("/api/tracking-requests");
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data.error || "Failed to refresh product setup requests.",
+          );
+        }
+
+        if (!Array.isArray(data.requests)) {
+          throw new Error("Invalid product setup response.");
+        }
+
+        const nextRequests = data.requests as TrackingRequest[];
+
+        if (cancelled) {
+          return;
+        }
+
+        const completed = nextRequests.some(
+          (request) =>
+            activeRequestIds.has(request.id) &&
+            request.status === "completed",
+        );
+        const failed = nextRequests.find(
+          (request) =>
+            activeRequestIds.has(request.id) &&
+            request.status === "failed",
+        );
+
+        setTrackingRequests(nextRequests);
+
+        if (failed) {
+          setError(
+            failed.error_message || "Product setup failed.",
+          );
+        }
+
+        if (completed) {
+          await loadWatchlist();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Failed to refresh product setup requests.",
+          );
+        }
+      } finally {
+        polling = false;
+      }
+    }
+
+    const interval = window.setInterval(
+      pollTrackingRequests,
+      10_000,
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [loadWatchlist, trackingRequests]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -146,11 +291,6 @@ export default function Home() {
       return;
     }
 
-    if (!email.trim()) {
-      setError("Email is required.");
-      return;
-    }
-
     if (targetPrice && Number(targetPrice) <= 0) {
       setError("Target price must be greater than 0.");
       return;
@@ -159,35 +299,102 @@ export default function Home() {
     try {
       setSubmitting(true);
 
-      const response = await fetch("/api/watchlist", {
+      const payload = {
+        productUrl,
+        size,
+        targetPrice,
+      };
+      const requestBody = JSON.stringify(payload);
+
+      const response = await fetch("/api/watch-intents", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          productUrl,
-          size,
-          targetPrice,
-          email,
-        }),
+        body: requestBody,
       });
 
       const data = await response.json();
+
+      if (response.ok) {
+        setProductUrl("");
+        setSize("");
+        setTargetPrice("");
+
+        await loadWatchlist();
+        return;
+      }
+
+      if (
+        response.status === 422 &&
+        data.error_code === "listing_not_indexed"
+      ) {
+        const trackingResponse = await fetch("/api/tracking-requests", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: requestBody,
+        });
+        const trackingData = await trackingResponse.json();
+
+        if (
+          trackingResponse.status === 409 &&
+          trackingData.error_code === "listing_already_indexed"
+        ) {
+          const retryResponse = await fetch("/api/watch-intents", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: requestBody,
+          });
+          const retryData = await retryResponse.json();
+
+          if (!retryResponse.ok) {
+            throw new Error(
+              retryData.error || "Failed to track product.",
+            );
+          }
+
+          setProductUrl("");
+          setSize("");
+          setTargetPrice("");
+
+          await loadWatchlist();
+          return;
+        }
+
+        if (trackingResponse.status !== 202) {
+          throw new Error(
+            trackingData.error || "Failed to set up product tracking.",
+          );
+        }
+
+        if (!trackingData.request) {
+          throw new Error("Invalid product setup response.");
+        }
+
+        const trackingRequest = trackingData.request as TrackingRequest;
+
+        setTrackingRequests((currentRequests) => [
+          trackingRequest,
+          ...currentRequests.filter(
+            (request) => request.id !== trackingRequest.id,
+          ),
+        ]);
+
+        setProductUrl("");
+        setSize("");
+        setTargetPrice("");
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(
           data.error || "Failed to track product.",
         );
       }
-
-      setProducts((currentProducts) => [
-        data.watchlistItem,
-        ...currentProducts,
-      ]);
-
-      setProductUrl("");
-      setSize("");
-      setTargetPrice("");
     } catch (err) {
       setError(
         err instanceof Error
@@ -288,7 +495,7 @@ export default function Home() {
               </h3>
 
               <p className="mt-2 text-sm text-zinc-500">
-                Start with an Adidas, Nike or ASICS product URL.
+                Currently supports Nike India product URLs.
               </p>
             </div>
 
@@ -311,7 +518,7 @@ export default function Home() {
                   onChange={(event) =>
                     setProductUrl(event.target.value)
                   }
-                  placeholder="https://www.asics.co.in/..."
+                  placeholder="https://www.nike.in/..."
                   className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition placeholder:text-zinc-600 focus:border-zinc-500"
                 />
               </div>
@@ -364,26 +571,6 @@ export default function Home() {
                 </div>
               </div>
 
-              <div>
-                <label
-                  htmlFor="email"
-                  className="mb-2 block text-sm font-medium text-zinc-300"
-                >
-                  Email
-                </label>
-
-                <input
-                  id="email"
-                  type="email"
-                  value={email}
-                  onChange={(event) =>
-                    setEmail(event.target.value)
-                  }
-                  placeholder="you@example.com"
-                  className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm outline-none transition placeholder:text-zinc-600 focus:border-zinc-500"
-                />
-              </div>
-
               {error && (
                 <div className="rounded-xl border border-red-900/70 bg-red-950/30 px-4 py-3 text-sm text-red-300">
                   {error}
@@ -406,6 +593,69 @@ export default function Home() {
             </p>
           </div>
         </section>
+
+        {trackingRequests.some(isActiveTrackingRequest) && (
+          <section className="mt-20 border-t border-zinc-900 pt-10">
+            <div className="mb-6">
+              <h2 className="text-2xl font-semibold">
+                Product setup
+              </h2>
+
+              <p className="mt-2 text-sm text-zinc-500">
+                New products appear in your watchlist after setup completes.
+              </p>
+            </div>
+
+            <div className="grid gap-4">
+              {trackingRequests
+                .filter(isActiveTrackingRequest)
+                .map((request) => {
+                  const requestedSize = getRequestedSize(request);
+
+                  return (
+                    <article
+                      key={request.id}
+                      className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5"
+                    >
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <a
+                            href={request.requested_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="block truncate text-sm text-zinc-400 underline decoration-zinc-700 underline-offset-4 hover:text-zinc-300"
+                          >
+                            {request.requested_url}
+                          </a>
+
+                          <div className="mt-3 flex flex-wrap gap-4 text-sm text-zinc-500">
+                            {requestedSize && (
+                              <span>Size: {requestedSize}</span>
+                            )}
+
+                            {request.target_price !== null && (
+                              <span>
+                                Target: {formatPrice(
+                                  request.target_price,
+                                  request.target_currency,
+                                )}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <span className="text-sm text-amber-400">
+                          {request.status === "processing"
+                            ? "Setting up tracking"
+                            : "Waiting for setup"}
+                        </span>
+                      </div>
+                    </article>
+                  );
+                })}
+            </div>
+          </section>
+        )}
 
         <section className="mt-20 border-t border-zinc-900 pt-10">
           <div className="mb-6">

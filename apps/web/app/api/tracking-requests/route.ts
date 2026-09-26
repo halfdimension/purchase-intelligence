@@ -307,6 +307,7 @@ export async function POST(request: Request) {
         {
           error:
             "This product is already indexed and does not need an ingestion request.",
+          error_code: "listing_already_indexed",
         },
         {
           status: 409,
