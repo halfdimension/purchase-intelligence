@@ -5,30 +5,15 @@ import {
   type FormEvent,
   useState,
 } from "react";
-import {
-  useRouter,
-  useSearchParams,
-} from "next/navigation";
-
-type AuthMode =
-  | "login"
-  | "signup";
+import { useRouter } from "next/navigation";
 
 type AuthResponse = {
   authenticated?: boolean;
-  emailConfirmationRequired?: boolean;
   error?: string;
 };
 
 function LoginPageContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-
-  const [ignoreQueryError, setIgnoreQueryError] =
-    useState(false);
-
-  const [mode, setMode] =
-    useState<AuthMode>("login");
 
   const [email, setEmail] =
     useState("");
@@ -39,20 +24,8 @@ function LoginPageContent() {
   const [error, setError] =
     useState("");
 
-  const [message, setMessage] =
-    useState("");
-
   const [submitting, setSubmitting] =
     useState(false);
-
-  function switchMode(
-    nextMode: AuthMode,
-  ) {
-    setMode(nextMode);
-    setError("");
-    setMessage("");
-    setIgnoreQueryError(true);
-  }
 
   async function handleSubmit(
     event: FormEvent<HTMLFormElement>,
@@ -60,8 +33,6 @@ function LoginPageContent() {
     event.preventDefault();
 
     setError("");
-    setMessage("");
-    setIgnoreQueryError(true);
 
     const normalizedEmail =
       email.trim().toLowerCase();
@@ -79,13 +50,8 @@ function LoginPageContent() {
     try {
       setSubmitting(true);
 
-      const endpoint =
-        mode === "login"
-          ? "/api/auth/login"
-          : "/api/auth/signup";
-
       const response = await fetch(
-        endpoint,
+        "/api/auth/login",
         {
           method: "POST",
           headers: {
@@ -105,31 +71,12 @@ function LoginPageContent() {
       if (!response.ok) {
         throw new Error(
           data.error
-          ?? (
-            mode === "login"
-              ? "Unable to sign in."
-              : "Unable to create account."
-          ),
+          ?? "Unable to sign in.",
         );
       }
 
       if (data.authenticated) {
         router.replace("/");
-        return;
-      }
-
-      if (
-        mode === "signup"
-        && data.emailConfirmationRequired
-      ) {
-        setPassword("");
-
-        setMessage(
-          "Account created. Check your email "
-          + "and confirm your address before "
-          + "signing in.",
-        );
-
         return;
       }
 
@@ -147,22 +94,6 @@ function LoginPageContent() {
       setSubmitting(false);
     }
   }
-
-  const isLogin =
-    mode === "login";
-
-  const confirmationError =
-    !ignoreQueryError
-    && searchParams.get("error")
-      === "confirmation_failed"
-      ? (
-        "Email confirmation failed or "
-        + "the link has expired."
-      )
-      : "";
-
-  const displayedError =
-    error || confirmationError;
 
   return (
     <main
@@ -217,9 +148,7 @@ function LoginPageContent() {
                 tracking-tight
               "
             >
-              {isLogin
-                ? "Welcome back"
-                : "Create your account"}
+              Welcome back
             </h1>
 
             <p
@@ -230,83 +159,9 @@ function LoginPageContent() {
                 text-zinc-400
               "
             >
-              {isLogin
-                ? (
-                  "Sign in to manage your "
-                  + "tracked products."
-                )
-                : (
-                  "Create an account to build "
-                  + "your personal watchlist."
-                )}
+              Sign in to manage your tracked
+              products.
             </p>
-          </div>
-
-          <div
-            className="
-              mb-7
-              grid
-              grid-cols-2
-              rounded-xl
-              bg-zinc-950
-              p-1
-            "
-          >
-            <button
-              type="button"
-              onClick={() =>
-                switchMode("login")
-              }
-              className={`
-                rounded-lg
-                px-4
-                py-2.5
-                text-sm
-                font-medium
-                transition
-                ${
-                  isLogin
-                    ? (
-                      "bg-zinc-800 "
-                      + "text-white"
-                    )
-                    : (
-                      "text-zinc-500 "
-                      + "hover:text-zinc-300"
-                    )
-                }
-              `}
-            >
-              Sign in
-            </button>
-
-            <button
-              type="button"
-              onClick={() =>
-                switchMode("signup")
-              }
-              className={`
-                rounded-lg
-                px-4
-                py-2.5
-                text-sm
-                font-medium
-                transition
-                ${
-                  !isLogin
-                    ? (
-                      "bg-zinc-800 "
-                      + "text-white"
-                    )
-                    : (
-                      "text-zinc-500 "
-                      + "hover:text-zinc-300"
-                    )
-                }
-              `}
-            >
-              Create account
-            </button>
           </div>
 
           <form
@@ -364,11 +219,7 @@ function LoginPageContent() {
 
               <input
                 type="password"
-                autoComplete={
-                  isLogin
-                    ? "current-password"
-                    : "new-password"
-                }
+                autoComplete="current-password"
                 value={password}
                 onChange={(event) =>
                   setPassword(
@@ -391,7 +242,7 @@ function LoginPageContent() {
               />
             </label>
 
-            {displayedError && (
+            {error && (
               <div
                 role="alert"
                 className="
@@ -406,25 +257,7 @@ function LoginPageContent() {
                   text-red-300
                 "
               >
-                {displayedError}
-              </div>
-            )}
-
-            {message && (
-              <div
-                className="
-                  rounded-xl
-                  border
-                  border-emerald-950
-                  bg-emerald-950/30
-                  px-4
-                  py-3
-                  text-sm
-                  leading-5
-                  text-emerald-300
-                "
-              >
-                {message}
+                {error}
               </div>
             )}
 
@@ -447,16 +280,8 @@ function LoginPageContent() {
               "
             >
               {submitting
-                ? (
-                  isLogin
-                    ? "Signing in..."
-                    : "Creating account..."
-                )
-                : (
-                  isLogin
-                    ? "Sign in"
-                    : "Create account"
-                )}
+                ? "Signing in..."
+                : "Sign in"}
             </button>
           </form>
 
