@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { ProductPriceHistory } from "@/app/components/ProductPriceHistory";
 import {
@@ -85,6 +86,8 @@ function formatLastChecked(value: string | null) {
 }
 
 export default function Home() {
+  const router = useRouter();
+
   const [productUrl, setProductUrl] = useState("");
   const [size, setSize] = useState("");
   const [targetPrice, setTargetPrice] = useState("");
@@ -96,8 +99,11 @@ export default function Home() {
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
   const [error, setError] = useState("");
 
+  const [checkingAuthentication, setCheckingAuthentication] = useState(true);
+  const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   const loadWatchlist = useCallback(async () => {
     const response = await fetch("/api/watch-intents");
@@ -182,10 +188,45 @@ export default function Home() {
       }
     }
 
-    loadInitialWatchlist();
-    loadTrackingRequests();
-    loadProfile();
-  }, [loadWatchlist]);
+    let cancelled = false;
+
+    async function authenticateAndLoad() {
+      try {
+        const response = await fetch("/api/auth/me");
+
+        if (cancelled) {
+          return;
+        }
+
+        if (response.status === 401) {
+          router.replace("/login");
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error("Unable to verify your session.");
+        }
+
+        setAuthenticated(true);
+        setCheckingAuthentication(false);
+
+        loadInitialWatchlist();
+        loadTrackingRequests();
+        loadProfile();
+      } catch {
+        if (!cancelled) {
+          setError("Unable to verify your session.");
+          setCheckingAuthentication(false);
+        }
+      }
+    }
+
+    authenticateAndLoad();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadWatchlist, router]);
 
   useEffect(() => {
     const activeRequestIds = new Set(
@@ -434,6 +475,39 @@ export default function Home() {
     }
   }
 
+  async function handleSignOut() {
+    setError("");
+    setSigningOut(true);
+
+    try {
+      const response = await fetch("/api/auth/logout", {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to sign out.");
+      }
+
+      router.replace("/login");
+      router.refresh();
+    } catch {
+      setError("Unable to sign out.");
+      setSigningOut(false);
+    }
+  }
+
+  if (checkingAuthentication || !authenticated) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-zinc-950 px-6 text-zinc-400">
+        <p>
+          {checkingAuthentication
+            ? "Checking session..."
+            : error || "Unable to verify your session."}
+        </p>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100">
       <div className="mx-auto min-h-screen max-w-6xl px-6 py-10 lg:px-8">
@@ -448,8 +522,19 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="rounded-full border border-zinc-800 px-4 py-2 text-sm text-zinc-400">
-            Watchlist {products.length > 0 && `(${products.length})`}
+          <div className="flex items-center gap-3">
+            <div className="rounded-full border border-zinc-800 px-4 py-2 text-sm text-zinc-400">
+              Watchlist {products.length > 0 && `(${products.length})`}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSignOut}
+              disabled={signingOut}
+              className="cursor-pointer text-sm text-zinc-500 transition hover:text-zinc-300 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {signingOut ? "Signing out..." : "Sign out"}
+            </button>
           </div>
         </header>
 
