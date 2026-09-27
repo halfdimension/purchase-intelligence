@@ -1,10 +1,28 @@
 # Purchase Intelligence — Project Context
 
-Last major architecture review: 2026-08-29
+Last major architecture review: 2026-09-27
 
 This file is the durable source of truth for AI assistants and developers working on this repository.
 
 Before making architectural changes, read this file and `AGENTS.md`.
+
+Detailed architecture references:
+
+- `docs/phase-1-domain-architecture.md` — implemented Phase 1 identity,
+  catalog, observation, watch, notification, and RLS foundation
+- `docs/phase-1-new-product-ingestion.md` — implemented durable request and
+  trusted new-product ingestion path
+- `docs/phase-2-general-purchase-intelligence.md` — target design and ordered
+  roadmap for general discovery, comparison, tracking, and purchase
+  intelligence
+
+Status language used by this document:
+
+- **IMPLEMENTED / VERIFIED** means the behavior exists and has been exercised
+  in the repository or production path described.
+- **CURRENT LIMITATION** means the constraint exists in today's runtime.
+- **TARGET / FUTURE** means product or architecture direction, not a claim that
+  the capability exists.
 
 ---
 
@@ -167,6 +185,57 @@ Variants:
 
 This separation is a major architectural requirement.
 
+## Official source is a first-class concept
+
+When available, the official brand/manufacturer source is the preferred
+catalog reference and should be presented before alternative merchants.
+
+Examples:
+
+- Nike product -> Nike official first
+- Adidas product -> Adidas official first
+- MacBook -> Apple official first
+- Samsung phone -> Samsung official first
+- Levi's product -> Levi's official first
+
+Official status and lowest price are separate dimensions. The product should
+eventually show the official price, best supported market price, difference
+from official, historical low, and user target without implying that the
+official source is cheapest.
+
+Official data may be higher-confidence evidence for canonical name, model,
+manufacturer identifiers, specifications, official variants, and images.
+Alternative merchants primarily contribute price, availability, seller,
+offers, delivery, and merchant-specific variant data.
+
+`brands.official_url` exists today, but the current schema does not yet model
+the official relationship between a brand/product and a merchant listing.
+That relationship is part of the next domain-generalization milestone.
+
+## Generic attributes and dynamic variants
+
+Product and variant representation must remain category-agnostic. Do not add
+columns such as `shoe_size`, `phone_storage`, `phone_ram`, `shirt_size`, or
+`laptop_gpu`. Prefer normalized structured attributes.
+
+Examples:
+
+```json
+{"color":"Titanium Black","storage":"512 GB","ram":"12 GB"}
+```
+
+```json
+{"color":"Black/White","size":"UK 9"}
+```
+
+Category schemas may describe common attribute axes, but they are guidance,
+not a rigid limit on what can be stored.
+
+The future frontend must derive controls from the actual purchasable variant
+matrix. An attribute with several values becomes a selector; an attribute
+with one value is displayed as a specification. A selection must resolve to a
+real variant combination rather than an invented Cartesian product.
+
 ---
 
 # 5. Product Discovery Architecture
@@ -219,6 +288,38 @@ Potential adapters may include:
 - other merchants
 
 Do not expose merchant-specific scraping structures directly to the frontend.
+
+The target entry point is natural product search rather than a URL. Examples
+include `S26 Ultra`, `MacBook Pro M4 Pro`, `Soundcore Q20i`, `Nike Pegasus 42`,
+`Levi's jeans`, or a broad category such as `headphones`.
+
+Interactive discovery should be hybrid:
+
+Fast path:
+- search the existing normalized catalog
+- use lightweight supported provider endpoints where available
+- return usable results quickly
+
+Asynchronous enrichment:
+- create durable discovery work when Playwright or expensive retrieval is
+  required
+- let a background worker retrieve, normalize and persist candidates
+- let the frontend poll or refresh instead of blocking one web request
+
+The durable `tracking_requests` architecture is the proven precedent for this
+kind of user-owned request plus trusted-worker processing.
+
+Cross-store matching must prefer deterministic evidence in this order:
+
+1. GTIN, EAN, or UPC
+2. manufacturer model/part number
+3. official product identifiers
+4. normalized brand, model, specifications, and variant attributes
+5. ML/embedding assistance when deterministic identity is insufficient
+6. an unresolved/manual-review state when confidence is inadequate
+
+An LLM must not be the sole product-identity authority, and uncertain products
+must not be silently merged.
 
 ---
 
@@ -383,6 +484,29 @@ Later use purchase history and explicit feedback to improve ranking.
 
 ML should only be introduced when sufficient real data exists.
 
+The near-term strategy is hybrid, not “ML controls everything”:
+
+```text
+raw merchant data
+    -> trustworthy structured extraction
+    -> deterministic parsing and normalization
+    -> category classification
+    -> attribute extraction
+    -> entity matching/ranking
+    -> canonical catalog
+```
+
+Structured merchant data and deterministic identifiers/rules come first. ML
+may assist classification, attribute extraction, and uncertain matching, but
+must return evidence/confidence and must not invent products, prices, stock,
+or offers. Do not train a custom model now; there is not enough labeled data.
+
+Collect real raw inputs, normalized outputs, identity evidence, confidence,
+and later corrections so a future training decision can be data-driven. A
+local open-source/pretrained model in an ephemeral worker is acceptable only
+when it materially improves a measured task and remains within the zero-cost
+constraint.
+
 ---
 
 # 11. Optional Personal Finance Intelligence
@@ -490,6 +614,30 @@ CORRECT:
 
 Crawler scheduling should therefore eventually operate on unique merchant listings rather than user watches.
 
+The current Phase 1 scheduler already resolves unique active merchant listing
+targets from watch intents. Broader distributed-systems evolution must remain
+evidence-driven:
+
+```text
+start simple
+    -> measure
+    -> identify the actual bottleneck and cause
+    -> introduce one targeted architectural change
+    -> measure again
+```
+
+Possible future changes include a search service for measured search
+CPU/latency, a durable queue and worker pool for crawler throughput, a cache
+for demonstrated repeated-read cost, a dedicated search engine when
+PostgreSQL search no longer fits, an image CDN for real media pressure, and an
+API gateway/load balancer when independently deployed or replicated services
+require them.
+
+Do not add microservices or another datastore merely to appear scalable.
+Polyglot persistence must answer a concrete access pattern and operational
+need. ImageKit or similar media infrastructure is not a background-compute
+platform.
+
 ---
 
 # 15. Current Technology
@@ -518,19 +666,68 @@ Automation:
 Repository:
 - GitHub repository `halfdimension/purchase-intelligence`
 
+Production web application:
+- `https://purchase-intelligence-lilac.vercel.app`
+
+Current responsibility split:
+
+- Vercel: web frontend and lightweight Next.js APIs
+- Supabase/PostgreSQL: Auth and durable relational/domain data
+- GitHub Actions: scheduled ingestion and monitoring workers
+- Python + Playwright: crawling and trusted background processing
+- Resend: email delivery
+- GitHub: durable source and deployment history
+
+## Zero-cost constraint
+
+The personal/prototype stage has a hard deployment/runtime budget of **₹0**.
+
+Current zero-cost-oriented choices are:
+
+- Vercel free tier
+- Supabase free tier
+- GitHub Actions
+- Python + Playwright in ephemeral workers
+- Resend free tier
+- deterministic rules and, only when useful, open-source/pretrained inference
+  in ephemeral workers
+- external merchant image URLs initially
+
+Core functionality must not require a paid hosted LLM, paid inference API, or
+other paid service. If a feature cannot fit legitimate free-tier limits,
+reduce scope, run it less often, choose a local/free design, or defer it.
+Free-tier quotas and terms are constraints to respect, not limits to evade
+with fake or multiple accounts.
+
 ---
 
-# 16. Current Working Prototype
+# 16. Current Implemented and Proven State
 
-The following has been proven working.
+The following is **IMPLEMENTED / VERIFIED** in the current private production
+application.
 
-## Watchlist
+## Authentication and private dashboard
 
-- persistent Supabase-backed watchlist
-- product URL
-- desired size
-- target price
-- notification email
+- Supabase Auth owns authentication identity.
+- Public signup is intentionally disabled for the current personal deployment.
+- Existing-account sign in and sign out are production-verified.
+- `/` checks `/api/auth/me` before showing the dashboard and redirects an
+  unauthenticated visitor to `/login` without flashing private content.
+- The dashboard reads and deletes authenticated Phase 1 `watch_intents`.
+
+## Current tracking setup flow
+
+- The user submits a Nike India product URL, optional UK size, and optional
+  target price.
+- An already-indexed listing creates a Phase 1 watch immediately.
+- An unknown supported URL creates a durable `tracking_request`.
+- The scheduled ingestion worker claims one request, validates it again,
+  scrapes through the Nike adapter, bootstraps normalized catalog records and
+  observations, then atomically materializes the watch.
+- Processing leases, expired-request reclaim, attempt fencing, idempotent
+  persistence, and ambiguous-outcome reconciliation are implemented.
+- The frontend shows pending/processing setup state, polls request status, and
+  reloads the Phase 1 watchlist after completion.
 
 ## Nike crawler
 
@@ -562,7 +759,9 @@ Current tested variants include UK sizes and availability.
 
 ## Historical prices
 
-Each crawler run inserts a `price_snapshots` row.
+Each monitoring run persists Phase 1 listing and listing-variant observations.
+The migration-window compatibility write also inserts a legacy
+`price_snapshots` row.
 
 Price-history API exists:
 
@@ -576,69 +775,112 @@ It returns:
 - latest price
 - snapshot count
 
-Frontend includes a price-history visualization.
+Frontend includes a price-history visualization, but its current API still
+reads legacy `price_snapshots`. Migrating that read path to Phase 1
+observations is required before Phase 0 cleanup.
 
 ## Alerts
 
-Watch evaluation currently considers:
+Phase 1 watch evaluation currently considers:
 
 - desired size availability
 - target price
 
-Current result states:
+The production workflow runs with Phase 1 notifications authoritative and the
+Phase 0 evaluator/email path disabled. A false -> true transition can create
+and deliver an alert. A true -> true evaluation suppresses duplicate alert
+spam. A true -> false transition resets the condition so a later false -> true
+transition can notify again.
 
-- WAIT
-- ALERT READY
-
-Resend email delivery has been tested.
-
-Alert state persistence prevents duplicate notifications while a condition remains true.
-
-A false → true transition can notify again later.
+Logical notification uniqueness, one delivery row per notification/channel,
+delivery claiming, retryable failure state, and provider idempotency are
+implemented. Actual Resend delivery has been verified in production.
 
 ## Cloud automation
 
-GitHub Actions runs the crawler every approximately two hours.
+- `.github/workflows/phase1-ingestion.yml` runs on manual dispatch and at
+  minutes 7, 22, 37, and 52 each hour. It invokes
+  `python -m crawler.run_phase1_ingestion`.
+- `.github/workflows/price-check.yml` runs on manual dispatch and every two
+  hours at minute 17. It invokes `python -m crawler.run_tracked` with Phase 1
+  notifications authoritative.
+- Both use GitHub-hosted Ubuntu, Python 3.14, and Playwright Chromium.
+- The laptop does not need to remain on.
 
-Workflow:
-`.github/workflows/price-check.yml`
+## Recent production cutover checkpoints
 
-It has been tested successfully on GitHub-hosted Ubuntu runners with:
+- `2f9a636` — Add Phase 1 ingestion runner
+- `0bdc664` — Fix Phase 1 Nike variant identity handling
+- `13a8203` — Schedule Phase 1 ingestion worker
+- `befcefa` — Cut homepage over to Phase 1 tracking
+- `346b7d8` — Make authentication sign-in only
+- `a8e14df` — Protect dashboard and add sign out
 
-- Python 3.14
-- Playwright Chromium
-- Supabase secrets
-- Resend secret
+## Current limitations
 
-Laptop does not need to remain on.
+The following is **CURRENT LIMITATION**, not hidden future behavior:
+
+- User-facing discovery is URL-first and supports Nike India only.
+- The form, compatibility view model, ingestion variant resolver, and
+  evaluator still assume a shoe `size`; the UI hardcodes UK-size options.
+- The ingestion adapter boundary exists, but normal monitoring still contains
+  direct Nike/generic scraper selection rather than one complete shared
+  merchant-adapter framework.
+- There is no official-source role model, general search, category
+  classification pipeline, dynamic variant UI, cross-store matching, or
+  multi-merchant comparison UX yet.
+- Phase 0 tables and selected compatibility writes/reads remain active.
 
 ---
 
 # 17. Current Database Evolution
 
-Existing migrations currently include:
+Migrations `005` through `021` add the Phase 1 model alongside the Phase 0
+prototype.
 
-- initial products/watchlists
-- product tracking fields
-- price snapshots
-- product variants
-- watch alert state
+Implemented Phase 1 domain areas:
 
-Current schema is prototype-oriented.
+- Supabase Auth-backed `profiles`
+- `categories` and `brands`
+- `canonical_products` and `canonical_variants`
+- `merchants`, `merchant_listings`, and `listing_variants`
+- immutable `listing_observations` and `listing_variant_observations`
+- `watch_intents`, listing targets, and evaluator state
+- notifications, delivery state, preferences, flags, and entitlements
+- durable `tracking_requests` with trusted claim, lease, reclaim, catalog
+  bootstrap, and watch-materialization RPCs
+- RLS and column privileges separating user-owned data from crawler-owned
+  catalog and worker state
 
-Do NOT treat it as the final domain schema.
+The populated Nike Phase 0 chain was backfilled into Phase 1, and later a
+previously unknown real Nike product was ingested into the new catalog and
+picked up automatically by normal monitoring.
 
-In particular:
+The following legacy tables still exist for compatibility:
 
-- `products` currently mixes canonical-product/listing concerns
-- `desired_size` is category-specific
-- watch ownership is email-based rather than user-account based
+- `products`
+- `product_variants`
+- `price_snapshots`
+- `watchlists`
+- `watch_alert_state`
 
-These are expected to change during the identity/domain redesign.
+Do not deepen dependencies on them. In particular, Phase 0 `products` mixes
+canonical-product and merchant-listing concerns, `desired_size` is
+category-specific, and ownership is email-based. Normal Phase 1 monitoring is
+authoritative for watch evaluation and notifications, but Phase 0 product
+persistence and the legacy price-history read path remain during the migration
+window.
+
+Do not drop legacy tables until replacement reads/writes are verified and an
+explicit cleanup migration is approved.
 
 ---
 
 # 18. Architecture Phases
+
+This section preserves the chronological Phase 0/Phase 1 implementation
+record. Statements inside a milestone describe the state at that milestone;
+sections 16, 17, and 19 are authoritative for current state and next work.
 
 ## Phase 0 — Working Vertical Slice
 
@@ -657,9 +899,10 @@ Proves:
 - deduplication
 - GitHub Actions
 
-## Phase 1 — Identity + Domain Model Redesign
+## Phase 1 — Identity, Domain, Ingestion, and Authenticated Runtime
 
-Status: IN PROGRESS.
+Status: **IMPLEMENTED / VERIFIED for the active production path; legacy
+compatibility cleanup remains.**
 
 Completed:
 
@@ -845,7 +1088,7 @@ Status: COMPLETE.
 
 Milestone 8/9 — Authenticated web/API cutover:
 
-Status: IN PROGRESS, with the core authenticated watch read/delete paths working.
+Status: COMPLETE for the current private production application.
 
 Completed:
 
@@ -878,6 +1121,14 @@ Completed:
 - temporary UK 7 watch creation/deletion was verified end-to-end
 - homepage Remove button migrated to the Phase 1 DELETE endpoint
 - homepage watch DELETE flow verified end-to-end without affecting the existing UK 9 watch
+- homepage CREATE first uses the indexed Phase 1 watch path and then creates a
+  durable `tracking_request` for an unknown supported Nike URL
+- pending/processing setup state is displayed and polled
+- completed setup reloads the normal Phase 1 watchlist
+- public signup is intentionally disabled; authentication is sign-in only
+- `/` verifies `/api/auth/me` before rendering private content
+- sign out uses `/api/auth/logout`
+- production sign-in/sign-out and dashboard protection are verified
 - recent checkpoints:
   - `f58317c` — `Migrate homepage watch reads to Phase 1`
   - `3a355ba` — `Show account email for watch alerts`
@@ -887,156 +1138,141 @@ Completed:
 
 Current intentional compatibility state:
 
-- homepage READ -> Phase 1
-- homepage DELETE -> Phase 1
-- homepage CREATE -> Phase 0 temporarily
-- `POST /api/watch-intents` can create a watch only when the merchant
-  listing is already indexed
-- unindexed supported Nike URLs can be staged through authenticated
+- homepage READ, CREATE, and DELETE use the Phase 1 domain path
+- indexed listings create watches synchronously through
+  `POST /api/watch-intents`
+- unindexed supported Nike URLs stage work through authenticated
   `POST /api/tracking-requests`
-- the trusted Phase 1 ingestion worker can now bootstrap the catalog
-  and materialize the resulting watch
-- ingestion-worker production scheduling remains disabled until local
-  migration 021 passes rollback/database verification and is applied
+- the trusted Phase 1 ingestion worker is scheduled and can bootstrap the
+  catalog and materialize the resulting watch
+- the client remains user-scoped and cannot mutate crawler-owned catalog data
 - legacy Phase 0 tables remain intact
-- existing price-history UI still uses the legacy `price_snapshots` history API during the migration window
+- monitoring still performs Phase 0 product/snapshot compatibility writes
+- price-history UI still uses the legacy `price_snapshots` API
 
-Next architectural task:
+Keep Phase 0 tables intact until required historical-read and compatibility
+paths have Phase 1 replacements and the production cutover is observed.
 
-Operationalize the verified new-product ingestion path safely without
-allowing the normal authenticated client to mutate crawler-owned
-catalog tables directly.
+## Phase 2 — General Purchase Intelligence
 
-Target responsibility split:
+Status: **TARGET / FUTURE.**
 
-authenticated user request
-    ↓
-validated tracking / ingestion request
-    ↓
-trusted crawler or ingestion worker
-    ↓
-merchant detection + scrape
-    ↓
-normalized canonical product / listing / variants
-    ↓
-Phase 1 catalog persistence
-    ↓
-materialize the user's watch intent
-    ↓
-normal listing-level crawler scheduling
+The target is search-first discovery, generic product/variant understanding,
+official-source-first comparison, multi-merchant offers, generalized tracking,
+and grounded purchase intelligence. The detailed architecture and dependency
+order are in `docs/phase-2-general-purchase-intelligence.md`.
 
-Do not switch homepage CREATE until ingestion lease/reclaim and safe
-worker scheduling exist and the pending/setup UI is ready.
+## Phase 2 dependency order
 
-Keep Phase 0 tables intact until required web/API compatibility and historical-read migrations are complete.
+The implementation order is intentional:
 
-## Phase 2 — Product Discovery UX
+1. **Generalize the domain model** — remove remaining Nike/shoe assumptions;
+   clarify brand, category, merchant/source role, official-source metadata,
+   and generic product/variant attributes while preserving production.
+2. **Merchant adapter framework** — derive a shared boundary from current code
+   and refactor Nike behind it.
+3. **Classification and normalization** — deterministic category detection,
+   category schemas, and generic attribute normalization; ML fallback later.
+4. **Discovery/search backend** — catalog search, supported provider discovery,
+   and durable asynchronous enrichment for expensive work.
+5. **Search-first homepage and result cards** — retain URL ingestion as an
+   advanced/fallback path initially.
+6. **Dynamic variant selection** — render controls from normalized variant
+   metadata instead of hardcoding shoe size.
+7. **Product detail and official-first comparison** — present the official
+   source prominently and alternatives separately; official and cheapest stay
+   distinct.
+8. **Second, very different category/source** — use an electronics example to
+   prove that one architecture handles footwear and electronics without
+   schema/UI redesign.
+9. **Cross-store entity resolution** — deterministic identifiers first,
+   normalized specifications next, ML/embedding assistance only where needed.
+10. **Generalized tracking** — official only, selected merchants, or all
+    supported merchants/best supported offer.
+11. **Purchase intelligence** — official-versus-market price, history,
+    historical low, target distance, stock comparison, and grounded BUY/WAIT
+    reasoning.
+12. **Scale from real evidence** — add observability and introduce queues,
+    caches, search infrastructure, services, gateways, or load balancing only
+    for measured bottlenecks.
+13. **Legacy cleanup** — remove Phase 0 paths only after their replacements are
+    proven.
 
-Replace URL-first workflow with:
-
-"What do you want to buy?"
-
-Add:
-
-- categories
-- brands
-- product discovery
-- images
-- product selection
-- source/merchant selection
-
-## Phase 3 — Multi-Source Tracking
-
-Add retailer adapters incrementally.
-
-Normalize all retailer data.
-
-Implement canonical-product matching.
-
-## Phase 4 — Production Monitoring
-
-When usage requires it:
-
-- scheduler
-- queue
-- workers
-- listing-level deduplication
-- retry/backoff
-- observability
-
-## Phase 5 — Deal Intelligence
-
-- offers
-- coupons
-- bank discounts
-- effective price
-- richer alert policies
-- merchant comparison
-
-## Phase 6 — Purchases + Personalization
-
-- purchase recording
-- ratings
-- returns
-- explicit preferences
-- recommendation feedback loop
-
-## Phase 7 — AI / ML
-
-Once sufficient real data exists:
-
-- conversational intent parsing
-- listing/product matching
-- recommendation ranking
-- price intelligence models
-- grounded explanations
-
-## Phase 8 — Labs / Admin Features
-
-- finance intelligence
-- Telegram
-- WhatsApp
-- push notifications
-- admin-controlled feature flags
+Later optional work includes purchases/feedback, personalization, finance
+Labs, additional notification channels, and admin tooling. It must not jump
+ahead of the catalog/discovery/tracking dependency chain.
 
 ---
 
 # 19. Immediate Next Step
 
-Phase 1 schema design, security, Auth foundation, Nike backfill, crawler persistence, watch evaluation, notification delivery, deduplication and scheduled notification cutover are now complete.
+The next engineering milestone after the 2026-09-27 documentation update is:
 
-Production scheduled notification execution is now Phase 1 authoritative.
+## Generalize the current catalog/domain model
 
-The Phase 0 evaluator/email notification path is disabled in production `phase1` mode.
+Goal:
 
-Do NOT delete the Phase 0 tables yet.
+The same architecture must represent both:
 
-Phase 0 product persistence and legacy web/API compatibility remain temporarily available while the remaining application surface is migrated.
+```json
+{
+  "product": "Nike Pegasus 42",
+  "variant_attributes": {
+    "color": "Black/White",
+    "size": "UK 9"
+  }
+}
+```
 
-Trusted new-product ingestion lease/reclaim/reconciliation is now
-implemented locally and database-verified. Migration 021 passed the
-rollback-only Supabase integration harness, rollback cleanup verification,
-and the real two-session `FOR UPDATE SKIP LOCKED` concurrency test.
+and:
 
-Migration 021 is now permanently applied and its production
-schema/security state is verified. Production ingestion scheduling
-remains disabled.
+```json
+{
+  "product": "Samsung Galaxy S26 Ultra",
+  "variant_attributes": {
+    "color": "Titanium Black",
+    "storage": "512 GB",
+    "ram": "12 GB"
+  }
+}
+```
 
-Dependency order:
+without category-specific database columns or a Samsung-only/Nike-only shared
+frontend model.
 
-1. verify ingestion-worker scheduling and cloud execution safely
-2. cut homepage CREATE over to `tracking_requests` and add
-   pending/setup UI
-5. verify the production UX
-6. retain Phase 0 compatibility until final cutover confidence
+This milestone should:
 
-The existing Nike crawler and Phase 1 notification pipeline should
-remain stable while ingestion reliability and the remaining frontend
-cutover are implemented.
+- evolve the existing Phase 1 catalog rather than create a parallel schema;
+- define stable generic product/variant attribute conventions;
+- clarify category schema guidance and display metadata;
+- represent merchant/source type and official brand/manufacturer relationship
+  explicitly enough for later official-first behavior;
+- keep official status independent from price rank;
+- update shared normalized contracts so later UI code can consume attribute
+  metadata instead of assuming `size`;
+- use additive migrations with a production compatibility/backfill plan;
+- preserve the current Nike ingestion, monitoring, evaluation, and alert path.
+
+Definition of done should include a documented/migrated generic model,
+footwear and phone fixtures or contract tests, no category-specific columns,
+passing relevant validation, a verified production migration strategy, and
+updated architecture documentation.
+
+Do not bundle search, a second live merchant, custom ML, premature
+microservices, or legacy-table deletion into this milestone.
+
+Do not delete Phase 0 tables yet. Phase 0 product/snapshot compatibility and
+the legacy price-history read must be replaced and verified before cleanup.
 
 ---
 
-# Latest Handoff Checkpoint — 2026-09-05
+# 20. Historical Phase 1 Ingestion Record — 2026-09-05
+
+This section preserves useful implementation evidence from the Phase 1
+ingestion handoff. Its original “next work” and compatibility statements have
+been updated below to reflect the later production cutover. Sections 16–19 and
+`docs/phase-2-general-purchase-intelligence.md` are authoritative for current
+status and future direction.
 
 ## Phase 1 New-Product Ingestion
 
@@ -1217,20 +1453,21 @@ Homepage:
 
 - READ -> Phase 1
 - DELETE -> Phase 1
-- CREATE -> Phase 0 intentionally
-
-Do NOT switch homepage CREATE yet.
+- CREATE -> Phase 1 indexed-watch path, with durable `tracking_requests` for
+  unknown supported Nike URLs
 
 Existing indexed-listing creation continues through:
 
 `POST /api/watch-intents`
 
-New unindexed supported URLs will eventually flow through:
+New unindexed supported URLs flow through:
 
 `POST /api/tracking-requests`
 
-Phase 0 remains the rollback path until the complete ingestion flow
-has been verified end-to-end.
+The scheduled ingestion worker, pending/setup UI, and end-to-end production
+flow are now implemented. Phase 0 tables and product/history compatibility
+remain, but Phase 0 is no longer the authoritative watch/evaluator/notification
+path.
 
 ## Milestone C — Trusted Crawler Request Processing
 
@@ -1389,15 +1626,17 @@ Migration 020 real-database verification completed:
   - `authenticated` execute: false
   - `anon` execute: false
 
-Intentionally unchanged:
+State at Milestone E and later resolution:
 
-- homepage CREATE still uses Phase 0
-- browser/Next.js code has no service-role access
-- existing production crawler/notification behavior is unchanged
-- `crawler.run_tracked` does not yet invoke new-product ingestion
-- Phase 0 compatibility remains intact
-- production scheduling and batch claiming remain blocked until local
-  migration 021 passes rollback/database verification and is applied
+- the browser/Next.js code still correctly has no service-role access
+- `crawler.run_tracked` remains the monitoring runner rather than invoking
+  new-product ingestion inline
+- migration 021 later passed rollback/database and concurrent `SKIP LOCKED`
+  verification and was applied
+- the dedicated `crawler.run_phase1_ingestion` runner was added and scheduled
+- homepage CREATE later cut over to the Phase 1 request flow
+- Phase 0 product/history compatibility remains, but Phase 1 watch and
+  notification execution is authoritative
 
 ## Milestone F — Real Ingestion and Monitoring Verification
 
@@ -1466,7 +1705,7 @@ Milestones D, E and F are complete.
 
 ## Milestone G — Processing Lease, Reclaim, and Reconciliation
 
-Status: IMPLEMENTED LOCALLY; ROLLBACK/DATABASE VERIFICATION PENDING
+Status: COMPLETE, DATABASE-VERIFIED, APPLIED, AND SCHEDULED
 
 Implemented locally:
 
@@ -1523,30 +1762,18 @@ making its first bootstrap only after N+1 persisted newer listing and
 variant state. No concrete corruption risk was found and migrations
 019/020 remain unchanged.
 
-Still pending:
+Completed after the original handoff:
 
-- review the exact migration/harness
-- run rollback-only verification against Supabase PostgreSQL
-- separately verify true simultaneous-session `SKIP LOCKED` behavior
-- decide whether to apply migration 021
-- verify ingestion scheduling/cloud execution only after the database
-  milestone is approved
+- migration 021 passed the rollback-only Supabase integration harness
+- rollback cleanup was verified
+- real simultaneous-session `FOR UPDATE SKIP LOCKED` behavior was verified
+- migration 021 was applied and its production schema/security state checked
+- the one-request ingestion runner was added
+- `.github/workflows/phase1-ingestion.yml` was enabled on a 15-minute schedule
+- homepage CREATE, pending/setup polling, private dashboard protection, and
+  sign-in/sign-out were cut over and verified
 
-## Exact Next Work
-
-1. review migration 021 and run the rollback-only database harness
-2. decide whether to apply migration 021
-3. verify ingestion-worker scheduling and cloud execution safely
-4. cut homepage CREATE over to `tracking_requests` and add
-   pending/setup UI
-5. verify the production UX
-6. retain Phase 0 compatibility until final cutover confidence
-
-Until migration 021 is reviewed, rollback-tested, and deliberately
-applied:
-
-- do not enable production scheduling or batch ingestion
-- keep the high-level ingestion processor limited to one request per
-  invocation
-- leave unresolved ambiguous transport outcomes in `processing` for
-  reconciliation/reclaim
+The exact next work is now the domain-generalization milestone in section 19,
+not further Phase 1 ingestion cutover work. The one-request-per-invocation
+limit remains an intentional prototype-scale policy until workload evidence
+justifies batch or worker-pool changes.

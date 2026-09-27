@@ -53,6 +53,9 @@ GitHub is the durable project history and source of truth.
 
 `docs/`
 - detailed architecture/design documents
+- `docs/phase-2-general-purchase-intelligence.md` is the target design and
+  ordered roadmap for general discovery, comparison, tracking, and purchase
+  intelligence beyond the Nike-specific Phase 1 implementation
 
 `supabase/migrations/`
 - database evolution
@@ -124,6 +127,8 @@ Live products, prices, stock and offers must come from real retrieval/provider/c
 AI can later be used for:
 
 - conversational intent interpretation,
+- product/category classification when deterministic evidence is insufficient,
+- attribute extraction from unstructured product data,
 - product/listing matching,
 - ranking,
 - grounded recommendation explanations,
@@ -133,16 +138,31 @@ Price prediction and other learned models should only be introduced when enough 
 
 ## Current Architectural Warning
 
-The current database is a successful prototype schema, not the final domain model.
+The repository is currently in a migration window between legacy Phase 0
+compatibility and the active Phase 1 model.
 
-Do not deepen dependencies on these assumptions without reviewing Phase 1 architecture:
+Do not deepen dependencies on legacy Phase 0 assumptions:
 
-- `products` currently mixes product and merchant-listing concerns,
-- email currently acts as user identity,
-- `desired_size` is category-specific,
-- crawling is still organized around the prototype tracking model.
+- legacy `products` mixes canonical-product and merchant-listing concerns,
+- legacy ownership is email-based,
+- legacy `desired_size` is category-specific,
+- legacy `price_snapshots` still supports the current price-history read path,
+- Phase 0 product/snapshot compatibility writes remain temporarily.
 
-These are expected to evolve.
+The active Phase 1 architecture already uses:
+
+- Supabase Auth-backed identity,
+- canonical products and canonical variants,
+- merchant listings and listing variants,
+- authenticated `watch_intents`,
+- Phase 1-driven crawl scheduling,
+- Phase 1 observations,
+- Phase 1 evaluation and notifications.
+
+Read `PROJECT_CONTEXT.md`, `docs/phase-1-domain-architecture.md`,
+`docs/phase-1-new-product-ingestion.md`, and
+`docs/phase-2-general-purchase-intelligence.md` before changing these
+boundaries.
 
 ## Large Refactors
 
@@ -155,4 +175,3 @@ Before a large refactor:
 3. document the target design,
 4. identify migration strategy,
 5. then perform the refactor.
-
